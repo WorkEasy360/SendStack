@@ -28,6 +28,7 @@ import Reports from "./pages/reports/Reports";
 import Credits from "./pages/credits/Credits";
 import Users from "./pages/users/Users";
 import Settings from "./pages/Settings";
+import BusinessProfile from "./pages/business/BusinessProfile";
 import Spinner from "./components/ui/Spinner";
 
 function ProtectedRoute({ children }) {
@@ -75,6 +76,7 @@ function AppRoutes() {
                 <Route path="templates" element={<Templates />} />
                 <Route path="whatsapp" element={<WhatsAppAccounts />} />
                 <Route path="compliance" element={<Compliance />} />
+                <Route path="business" element={<BusinessProfile />} />
                 <Route path="credits" element={<Credits />} />
                 <Route path="users" element={<Users />} />
                 <Route path="branding" element={<Branding />} />

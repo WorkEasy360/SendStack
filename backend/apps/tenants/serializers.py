@@ -2,7 +2,7 @@ import re
 
 from rest_framework import serializers
 
-from .models import TenantBranding
+from .models import BusinessProfile, TenantBranding
 
 _HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -45,3 +45,32 @@ class TenantBrandingSerializer(serializers.ModelSerializer):
         if not cleaned or " " in cleaned:
             raise serializers.ValidationError("Use a bare hostname like app.example.com.")
         return cleaned
+
+
+class BusinessProfileSerializer(serializers.ModelSerializer):
+    """
+    The business's own account of itself, as the agents read it.
+
+    `preview` is the whole point of exposing this rather than just the fields:
+    a user filling these boxes in is really writing part of an AI prompt, and
+    the only honest way to show what they are writing is to show the rendered
+    text the model will actually be given.
+    """
+
+    preview = serializers.SerializerMethodField()
+    is_configured = serializers.BooleanField(read_only=True)
+    # `display_name` is a method on the model; DRF calls simple callables when
+    # it resolves an attribute, so this needs no source of its own.
+    display_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = BusinessProfile
+        fields = (
+            "trading_name", "description", "products", "services", "locations",
+            "contact_details", "policies", "escalation_rules", "languages", "tone",
+            "target_customers", "preview", "is_configured", "display_name", "updated_at",
+        )
+        read_only_fields = ("preview", "is_configured", "display_name", "updated_at")
+
+    def get_preview(self, obj):
+        return obj.to_prompt()

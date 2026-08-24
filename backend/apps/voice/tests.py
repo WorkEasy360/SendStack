@@ -367,6 +367,48 @@ class TurnTests(Fixture):
         # The speech rules are what stop it reading markdown down a phone line.
         self.assertIn("No markdown", system)
 
+    def test_the_customer_the_agent_is_calling_reaches_the_prompt(self):
+        """
+        The differentiator in one assertion: an agent that phones a customer
+        should already know what the CRM knows about them, rather than
+        introducing itself to a stranger the business has been selling to for
+        weeks.
+        """
+        from apps.crm import services as crm_services
+
+        self.contact.name = "Ravi"
+        self.contact.company = "Ravi Traders"
+        self.contact.save()
+        crm_services.create_deal(
+            tenant=self.tenant, contact=self.contact, name="Fifty cycles", value=250000, actor=self.owner,
+        )
+
+        with patch.object(agent, "converse", return_value=_reply("Sure.")) as mock:
+            services.on_turn(self.session, self.turn("hello"))
+
+        system = mock.call_args.kwargs["system"]
+        self.assertIn("Ravi Traders", system)
+        self.assertIn("Fifty cycles", system)
+        # Somebody else may have picked up the phone, so the agent is told not
+        # to volunteer any of this until it knows who it is speaking to.
+        self.assertIn("somebody who has not confirmed", system)
+
+    def test_the_shared_business_profile_reaches_the_call(self):
+        from apps.tenants.models import BusinessProfile
+
+        BusinessProfile.objects.create(
+            tenant=self.tenant, description="We sell and service bicycles.", locations="Pune",
+        )
+
+        with patch.object(agent, "converse", return_value=_reply("Sure.")) as mock:
+            services.on_turn(self.session, self.turn("hello"))
+
+        system = mock.call_args.kwargs["system"]
+        self.assertIn("We sell and service bicycles.", system)
+        self.assertIn("Pune", system)
+        # The older free-text box is still honoured beside it.
+        self.assertIn("Acme sells bicycles.", system)
+
     def test_end_call_hangs_up_and_says_goodbye_first(self):
         response = _reply(tool_calls=[_tool("end_call", {"farewell": "Thanks, goodbye."})])
         with patch.object(agent, "converse", return_value=response):

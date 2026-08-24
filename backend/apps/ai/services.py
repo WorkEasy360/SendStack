@@ -45,6 +45,20 @@ Answer only from the reference material below. If it does not contain the answer
 _NO_KNOWLEDGE_FOUND = """
 There is no reference material for this question."""
 
+#: How the agent is to treat what the CRM knows about the person it is
+#: talking to. Spelled out because the two kinds of fact behave differently
+#: and a model given both without being told will blur them: the customer
+#: details are *verified records about this person* and may be used freely,
+#: while anything about products, prices or policy still has to come from the
+#: reference material. Without this note a knowledge-only agent refuses to
+#: acknowledge a customer's own order, which reads as broken rather than safe.
+_CUSTOMER_NOTE = """
+What you know about this customer is recorded fact from our own records -- use it to answer
+naturally and to judge what they need. It does not license you to invent anything about our
+products, prices, stock or policies; those still come only from the reference material.
+Never read this back to the customer as a list, never mention scores, internal statuses or
+who owns the account, and never tell them what our team has been asked to do about them."""
+
 
 def _api_key(config) -> str | None:
     return config.get_api_key() or getattr(settings, "AI_API_KEY", "") or None
@@ -56,14 +70,69 @@ def is_configured(config=None, tenant_id=None) -> bool:
     return bool(config.is_enabled and _api_key(config))
 
 
-def build_system_prompt(config, chunks) -> str:
+def business_profile(tenant_id):
+    """
+    The tenant's structured account of itself, or an unsaved blank one.
+
+    Never writes: this is read on the inbound-message path, and a read that
+    creates a row is a read that can deadlock two workers answering the same
+    customer at once.
+    """
+    from apps.tenants.models import BusinessProfile
+
+    return BusinessProfile.for_tenant(tenant_id)
+
+
+def customer_context(conversation):
+    """
+    Who the agent is talking to, assembled from the CRM.
+
+    Wrapped in a guard because this is decoration on an answer, not the
+    answer: a customer whose context cannot be built should still get a reply
+    from the knowledge base, exactly as they did before this existed.
+    """
+    try:
+        from apps.crm import context as crm_context
+
+        return crm_context.for_conversation(conversation)
+    except Exception:  # noqa: BLE001 - never cost a customer their answer
+        logger.exception("Could not build customer context for conversation %s", getattr(conversation, "pk", None))
+        return None
+
+
+def build_system_prompt(config, chunks, *, customer=None, profile=None) -> str:
+    """
+    Everything the agent is told before it sees the conversation.
+
+    The order is the priority order the platform commits to: standing business
+    rules first, then verified reference material, then what our records say
+    about this customer, and only then the conversation itself. A model reads
+    what it is given in order, and this is the order in which those sources
+    should win when they disagree.
+
+    `customer` and `profile` are optional so the two callers that legitimately
+    have neither -- the admin test panel, which asks a question with no
+    customer attached -- keep working unchanged.
+    """
     parts = [_BASE_INSTRUCTIONS.format(handoff=HANDOFF_TOKEN)]
+
+    # The structured profile is the business's own account of itself and comes
+    # first; `business_context` is the older free-text box and is still
+    # appended, so nothing a tenant typed before the profile existed is lost.
+    if profile is not None:
+        business = profile.to_prompt()
+        if business:
+            parts.append(f"\nAbout this business:\n{business}")
 
     if config.business_context.strip():
         parts.append(f"\nAbout this business:\n{config.business_context.strip()}")
 
     if config.answer_from_knowledge_only:
         parts.append(_KNOWLEDGE_ONLY.format(handoff=HANDOFF_TOKEN))
+
+    if customer:
+        parts.append(f"\nWho you are talking to:\n{customer.to_prompt()}")
+        parts.append(_CUSTOMER_NOTE)
 
     if chunks:
         references = "\n\n".join(
@@ -486,7 +555,10 @@ def answer(conversation, inbound_message, *, config=None) -> bool:
     if config.answer_from_knowledge_only and (not retrieval or retrieval.relevance < floor):
         return _send_fallback(conversation, config, retrieval, inbound_message, question)
 
-    system = build_system_prompt(config, retrieval.chunks)
+    system = build_system_prompt(
+        config, retrieval.chunks,
+        customer=customer_context(conversation), profile=business_profile(conversation.tenant_id),
+    )
     history = build_history(conversation, config.history_messages)
     if not history:
         history = [{"role": "user", "content": question}]
@@ -593,7 +665,7 @@ def ask(tenant_id, question: str, *, knowledge_base_id=None, config=None) -> dic
         _record_answer(config, None, None, retrieval, question=question, is_test=True)
         return result
 
-    system = build_system_prompt(config, retrieval.chunks)
+    system = build_system_prompt(config, retrieval.chunks, profile=business_profile(tenant_id))
     try:
         response = _ask(config, system, [{"role": "user", "content": question}])
     except AIProviderError as exc:
@@ -660,7 +732,10 @@ def suggest_reply(conversation) -> str:
     )
     chunks = knowledge.search(conversation.tenant_id, last_customer_message, limit=config.knowledge_chunks)
 
-    system = build_system_prompt(config, chunks) + (
+    system = build_system_prompt(
+        config, chunks,
+        customer=customer_context(conversation), profile=business_profile(conversation.tenant_id),
+    ) + (
         "\n\nYou are drafting a reply for a human agent to review before it is sent. "
         f"Write the reply itself and nothing else. If you cannot draft one, reply with exactly {HANDOFF_TOKEN}."
     )

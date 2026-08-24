@@ -15,6 +15,7 @@ import {
     Settings,
     ShieldCheck,
     Building2,
+    BriefcaseBusiness,
     Layers,
     Palette,
     Smartphone,
@@ -66,6 +67,7 @@ export const NAV_GROUPS = [
         label: "Manage",
         items: [
             { to: "/whatsapp", label: "Devices", icon: Smartphone, roles: null },
+            { to: "/business", label: "Business profile", icon: BriefcaseBusiness, roles: null },
             { to: "/team", label: "Team", icon: Users, roles: null },
             { to: "/compliance", label: "Compliance", icon: ShieldCheck, roles: null },
         ],

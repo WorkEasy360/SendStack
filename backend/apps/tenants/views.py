@@ -4,8 +4,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
-from .models import Tenant, TenantBranding
-from .serializers import TenantBrandingSerializer
+from .models import BusinessProfile, Tenant, TenantBranding
+from .serializers import BusinessProfileSerializer, TenantBrandingSerializer
 
 
 class CanEditBranding(IsAuthenticated):
@@ -89,3 +89,25 @@ class CustomerListView(APIView):
         if user.role == user.Role.RESELLER and user.tenant_id:
             return Response({"customers": services.customer_summaries(user.tenant_id)})
         return Response({"customers": []})
+
+
+class BusinessProfileView(generics.RetrieveUpdateAPIView):
+    """
+    What this business is, as both AI agents read it.
+
+    Any signed-in user of the tenant may read and edit it, unlike branding:
+    branding is the reseller's to control, but a business describing itself is
+    the business's own job, and gating it behind a role means the person who
+    knows the answers cannot type them in.
+
+    Reading it creates the row, which is the one place a write on a read is
+    right: the agents themselves use `BusinessProfile.for_tenant`, which never
+    writes, so nothing on the message path depends on this having been opened.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = BusinessProfileSerializer
+
+    def get_object(self):
+        profile, _ = BusinessProfile.objects.get_or_create(tenant=self.request.user.tenant)
+        return profile

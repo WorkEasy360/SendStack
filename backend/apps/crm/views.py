@@ -293,6 +293,36 @@ class SmartSegmentsView(APIView):
         return Response({"segments": smart_segments.catalog(request.user.tenant, with_counts=with_counts)})
 
 
+class ContactContextView(APIView):
+    """
+    Everything the AI knows about one customer, as the AI is given it.
+
+    Two representations because they answer two different questions. `context`
+    is the structured record a screen or a tool wants to read fields out of;
+    `prompt` is the exact text handed to a model, which is what makes "why did
+    the assistant say that?" answerable without reading the code.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, contact_id):
+        from apps.contacts.models import Contact
+
+        from . import context as customer_context
+
+        contact = (
+            Contact.objects.filter(pk=contact_id, tenant=request.user.tenant)
+            .select_related("owner")
+            .prefetch_related("tags")
+            .first()
+        )
+        if contact is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        built = customer_context.build(contact)
+        return Response({"context": built.to_dict(), "prompt": built.to_prompt()})
+
+
 class ContactTimelineView(APIView):
     """The merged CRM + message history for one contact."""
 

@@ -58,6 +58,17 @@ mistakes: wrong homophones, missing words, mangled names and numbers. Read throu
 where the meaning is obvious. Where it is not -- especially for a number, a name or an email
 address -- read it back to them and ask if you have it right, rather than guessing."""
 
+#: The spoken counterpart of the WhatsApp agent's note. Stricter about one
+#: thing: on a phone call the agent cannot be sure who picked up, so reciting
+#: what the CRM knows is not just tactless, it risks telling somebody else's
+#: household about their deals.
+_CUSTOMER_NOTE = """
+What you know about this customer is recorded fact from our own records. Use it to sound like
+somebody who knows them, and to judge what they need. It does not license you to invent anything
+about our products, prices, stock or policies. Never read these details out as a list, never
+mention scores or internal statuses, and never volunteer them to somebody who has not confirmed
+they are the person you called -- somebody else may have answered the phone."""
+
 _KNOWLEDGE_ONLY = """
 Answer only from the reference material you are given. If it does not cover something, say you
 will check and have someone follow up, rather than guessing."""
@@ -81,8 +92,56 @@ def api_key(config) -> str | None:
     return config.get_api_key() or getattr(settings, "AI_API_KEY", "") or None
 
 
+def _business_profile(tenant_id):
+    """The tenant's own account of itself -- the same record the WhatsApp agent reads."""
+    try:
+        from apps.tenants.models import BusinessProfile
+
+        return BusinessProfile.for_tenant(tenant_id)
+    except Exception:  # noqa: BLE001 - never drop a live call over context
+        logger.exception("Could not load the business profile for tenant %s", tenant_id)
+        return None
+
+
+def customer_context(session):
+    """
+    Who is on the other end of this call, from the CRM.
+
+    Guarded for the same reason the WhatsApp agent's is: the caller is on the
+    line and the carrier will hang up on a webhook that raises. A call where
+    the context could not be assembled is a call the agent takes knowing
+    less, not a call that fails.
+    """
+    contact = getattr(session, "contact", None)
+    if contact is None:
+        return None
+    try:
+        from apps.crm import context as crm_context
+
+        return crm_context.build(contact)
+    except Exception:  # noqa: BLE001 - never drop a live call over context
+        logger.exception("Could not build customer context for call %s", getattr(session, "pk", None))
+        return None
+
+
 def build_system_prompt(config, session, chunks) -> str:
+    """
+    Everything the agent is told before the call starts.
+
+    Same priority order as the WhatsApp agent, for the same reason: standing
+    business rules, then this call's purpose, then verified records about the
+    person, then the reference material, then the transcript. The two agents
+    read one business profile and one customer context so a caller who was
+    just chatting on WhatsApp is not met by an agent that has never heard of
+    them.
+    """
     parts = [_INSTRUCTIONS.format(name=config.display_name or "the assistant"), _SPEECH_NOTE]
+
+    profile = _business_profile(session.tenant_id)
+    if profile is not None:
+        business = profile.to_prompt()
+        if business:
+            parts.append(f"\nAbout this business:\n{business}")
 
     if config.business_context.strip():
         parts.append(f"\nAbout this business:\n{config.business_context.strip()}")
@@ -91,7 +150,11 @@ def build_system_prompt(config, session, chunks) -> str:
     if goal:
         parts.append(f"\nWhy you are on this call:\n{goal}")
 
-    if session.contact is not None and session.contact.name:
+    customer = customer_context(session)
+    if customer:
+        parts.append(f"\nWho you are speaking to:\n{customer.to_prompt()}")
+        parts.append(_CUSTOMER_NOTE)
+    elif session.contact is not None and session.contact.name:
         parts.append(f"\nYou are speaking to {session.contact.name}.")
 
     if session.context:

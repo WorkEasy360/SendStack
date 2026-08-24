@@ -155,6 +155,74 @@ class PromptTests(Fixture):
 
         self.assertIn("handmade sarees", services.build_system_prompt(config, []))
 
+    def test_the_structured_business_profile_reaches_the_prompt(self):
+        """
+        The profile is the shared record both agents read. The older free-text
+        box still works alongside it, so a tenant who filled that in before
+        the profile existed loses nothing.
+        """
+        from apps.tenants.models import BusinessProfile
+
+        BusinessProfile.objects.create(tenant=self.tenant, description="We sell and service bicycles.")
+        config = self._config(business_context="Always mention the summer sale.")
+
+        prompt = services.build_system_prompt(
+            config, [], profile=services.business_profile(self.tenant.pk),
+        )
+
+        self.assertIn("We sell and service bicycles.", prompt)
+        self.assertIn("Always mention the summer sale.", prompt)
+
+    def test_the_customer_the_agent_is_talking_to_reaches_the_prompt(self):
+        from apps.crm import services as crm_services
+
+        crm_services.create_deal(
+            tenant=self.tenant, contact=self.contact, name="Fifty cycles", value=250000, actor=self.owner,
+        )
+        config = self._config()
+
+        prompt = services.build_system_prompt(
+            config, [], customer=services.customer_context(self.conversation),
+        )
+
+        self.assertIn("Priya", prompt)
+        self.assertIn("Fifty cycles", prompt)
+        # Customer facts must not read as a licence to invent product facts.
+        self.assertIn("does not license you to invent", prompt)
+
+    def test_a_customer_whose_context_cannot_be_built_still_gets_an_answer(self):
+        """
+        Context is decoration on an answer, never the answer. If assembling it
+        fails, the customer must still be replied to exactly as they were
+        before this layer existed.
+        """
+        from apps.crm import context as crm_context
+
+        self._config()
+        self._document()
+        with patch.object(crm_context, "for_conversation", side_effect=RuntimeError("boom")):
+            self.assertIsNone(services.customer_context(self.conversation))
+
+    def test_the_reply_path_hands_both_the_customer_and_the_business_to_the_model(self):
+        from apps.tenants.models import BusinessProfile
+
+        BusinessProfile.objects.create(tenant=self.tenant, description="We sell and service bicycles.")
+        config = self._config(answer_from_knowledge_only=False)
+        inbound = self._inbound("do you have the blue one")
+        sent = Message.objects.create(
+            tenant=self.tenant, conversation=self.conversation, whatsapp_account=self.account,
+            contact=self.contact, to_phone=self.contact.phone, direction=Message.Direction.OUTBOUND,
+            body="Yes, we do.", status=Message.Status.SENT,
+        )
+
+        with patch.object(services, "_ask", return_value=_reply("Yes, we do.")) as mock:
+            with patch("apps.automation.services.send_automated_message", return_value=sent):
+                services.answer(self.conversation, inbound, config=config)
+
+        system = mock.call_args[0][1]
+        self.assertIn("We sell and service bicycles.", system)
+        self.assertIn("Priya", system)
+
     def test_history_alternates_and_starts_with_the_customer(self):
         self._config()
         Message.objects.create(

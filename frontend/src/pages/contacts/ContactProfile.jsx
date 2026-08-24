@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
     Activity as ActivityIcon,
+    BrainCircuit,
     Briefcase,
     Building2,
     CheckCircle2,
@@ -29,6 +30,7 @@ import PageHeader from "../../components/ui/PageHeader";
 import Spinner from "../../components/ui/Spinner";
 import Tabs from "../../components/ui/Tabs";
 import { Field, Input, Select, Textarea } from "../../components/ui/Field";
+import Skeleton from "../../components/ui/Skeleton";
 import { useToast } from "../../components/ui/Toast";
 import {
     DealStatusBadge,
@@ -140,6 +142,10 @@ export default function ContactProfile() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [tab, setTab] = useState("timeline");
+    // Fetched only when the tab is opened. It is a debugging view, not
+    // something worth a request on every profile load.
+    const [aiContext, setAiContext] = useState(null);
+    const [aiContextError, setAiContextError] = useState("");
     const [busy, setBusy] = useState(false);
 
     const [noteBody, setNoteBody] = useState("");
@@ -348,11 +354,30 @@ export default function ContactProfile() {
     const openTasks = (profile.tasks || []).filter((task) => task.status === "OPEN");
     const conversation = (profile.conversations || [])[0];
 
+    // The AI-context tab is a read-only window onto what the agents are given.
+    // Fetched on open rather than on page load: nobody opens a customer to
+    // debug a prompt, so it should cost nothing until they ask.
+    useEffect(() => {
+        if (tab !== "ai" || aiContext) return;
+        let cancelled = false;
+        api.get(`/crm/contacts/${id}/context/`)
+            .then(({ data }) => {
+                if (!cancelled) setAiContext(data);
+            })
+            .catch((err) => {
+                if (!cancelled) setAiContextError(apiErrorMessage(err, "Could not load what the AI knows."));
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [tab, aiContext, id]);
+
     const tabs = [
         { id: "timeline", label: "Timeline", icon: ActivityIcon },
         { id: "deals", label: "Deals", icon: Handshake, count: openDeals.length || undefined },
         { id: "tasks", label: "Tasks", icon: Clock, count: openTasks.length || undefined },
         { id: "notes", label: "Notes", icon: NotebookPen, count: profile.notes?.length || undefined },
+        { id: "ai", label: "What the AI knows", icon: BrainCircuit },
     ];
 
     return (
@@ -684,6 +709,30 @@ export default function ContactProfile() {
                                     title="Nothing scheduled"
                                     description="Add a task so the next step on this customer shows up on your dashboard instead of in your head."
                                 />
+                            )}
+                        </Card>
+                    )}
+
+                    {tab === "ai" && (
+                        <Card>
+                            <CardHeader
+                                title="What the AI knows about this customer"
+                                description="The exact text both the WhatsApp assistant and the calling agent are given before they answer."
+                                className="mb-4"
+                            />
+                            <Alert>{aiContextError}</Alert>
+                            {!aiContext && !aiContextError && <Skeleton className="h-24 w-full" />}
+                            {aiContext && (
+                                <>
+                                    <pre className="text-xs leading-relaxed text-ink-700 bg-ink-50 border border-ink-200 rounded-lg p-3 m-0 whitespace-pre-wrap break-words">
+                                        {aiContext.prompt}
+                                    </pre>
+                                    <p className="text-xs text-ink-500 mt-3 mb-0">
+                                        Assembled from this customer's record every time an agent replies. It is
+                                        never read back to the customer as a list, and scores, statuses and owners
+                                        are never mentioned to them.
+                                    </p>
+                                </>
                             )}
                         </Card>
                     )}
