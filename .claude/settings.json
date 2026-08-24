@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import django; print\\(django.VERSION\\)\")",
+      "Bash(grep -v \"^$\")",
+      "Bash(python manage.py check)",
+      "Bash(python manage.py makemigrations whatsapp)",
+      "Bash(python manage.py makemigrations --check --dry-run)",
+      "Bash(python manage.py migrate whatsapp)",
+      "Bash(python manage.py test apps.whatsapp -v 2)",
+      "Bash(python manage.py test apps.campaigns apps.messaging)",
+      "Bash(python manage.py test)",
+      "Bash(npm run *)",
+      "Bash(python manage.py test apps.whatsapp apps.campaigns apps.messaging apps.accounts apps.tenants -v 1)",
+      "Bash(python manage.py spectacular --file /dev/null)",
+      "Bash(python manage.py test apps.whatsapp -v 0)",
+      "Bash(npm --version)",
+      "Bash(docker --version)",
+      "Read(//c/Users/aqw03/OneDrive/Desktop/**)",
+      "Bash(npm install *)",
+      "Bash(export QR_PROVIDER_API_KEY=\"dev-test-key-12345\")",
+      "Bash(export QR_PROVIDER_WEBHOOK_SECRET=\"dev-webhook-secret-67890\")",
+      "Bash(export PORT=4001)",
+      "Bash(export QR_BRIDGE_DATA_DIR=\"./data\")",
+      "Bash(nohup node dist/index.js)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:4001/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -X POST http://localhost:4001/sessions -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s -X POST http://localhost:4001/sessions -H \"Authorization: Bearer dev-test-key-12345\" -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s -X POST http://localhost:4001/sessions -H 'Authorization: Bearer dev-test-key-12345' -H 'Content-Type: application/json' -d '{\"account_id\": 999, \"connection_webhook_url\": \"http://localhost:8000/api/v1/whatsapp/webhooks/qr_provider/\", \"message_webhook_url\": \"http://localhost:8000/api/v1/whatsapp/webhook/999/\"}' -o /tmp/session_response.json -w 'HTTP %{http_code}\\\\n')",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s http://localhost:4001/sessions/b3dec4e4-6bfb-4a86-8c01-22d01d7d48f2 -H 'Authorization: Bearer dev-test-key-12345')",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' -X DELETE http://localhost:4001/sessions/b3dec4e4-6bfb-4a86-8c01-22d01d7d48f2 -H 'Authorization: Bearer dev-test-key-12345')",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' http://localhost:4001/sessions/b3dec4e4-6bfb-4a86-8c01-22d01d7d48f2 -H 'Authorization: Bearer dev-test-key-12345')",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"dist/index.js\")",
+      "Bash(curl -s -o /dev/null -w \"post-kill health check: %{http_code}\\\\n\" http://localhost:4001/health)",
+      "Bash(tasklist //FI \"IMAGENAME eq node.exe\")",
+      "Bash(taskkill //PID 30496 //F)",
+      "Bash(curl -s -o /dev/null -w \"post-kill health check: %{http_code}\\\\n\" --max-time 2 http://localhost:4001/health)"
+    ]
+  }
+}

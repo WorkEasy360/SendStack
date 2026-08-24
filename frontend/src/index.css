@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ *
+ * MultiSender design system
+ *
+ * Tokens live here and are exposed to Tailwind through @theme, so
+ * utilities like `bg-brand-600`, `text-ink-500` and `rounded-card`
+ * work everywhere instead of hand-written hex values in components.
+ * ------------------------------------------------------------------ */
+
+@theme {
+    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+        Roboto, "Helvetica Neue", Arial, sans-serif;
+
+    /* Accent — used for active nav, primary buttons, links, "good" status. */
+    --color-brand-50: #ecfdf5;
+    --color-brand-100: #d1fae5;
+    --color-brand-200: #a7f3d0;
+    --color-brand-300: #6ee7b7;
+    --color-brand-400: #34d399;
+    --color-brand-500: #10b981;
+    --color-brand-600: #059669;
+    --color-brand-700: #047857;
+    --color-brand-800: #065f46;
+    --color-brand-900: #064e3b;
+
+    /* Ink — near-black neutral ramp for text, borders and surfaces. */
+    --color-ink-50: #f8fafc;
+    --color-ink-100: #f1f5f9;
+    --color-ink-200: #e2e8f0;
+    --color-ink-300: #cbd5e1;
+    --color-ink-400: #94a3b8;
+    --color-ink-500: #64748b;
+    --color-ink-600: #475569;
+    --color-ink-700: #334155;
+    --color-ink-800: #1e293b;
+    --color-ink-900: #0f172a;
+
+    --radius-card: 0.875rem;
+
+    /* Deliberately light: cards are separated by border first, shadow second. */
+    --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04);
+    --shadow-raised: 0 4px 16px -2px rgb(15 23 42 / 0.08),
+        0 2px 4px -2px rgb(15 23 42 / 0.04);
+    --shadow-overlay: 0 24px 48px -12px rgb(15 23 42 / 0.25);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    -webkit-text-size-adjust: 100%;
+}
+
+body {
+    margin: 0;
+    font-family: var(--font-sans);
+    background: var(--color-ink-50);
+    color: var(--color-ink-900);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+    color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4 {
+    letter-spacing: -0.011em;
+}
+
+/* Keyboard focus stays visible everywhere; pointer focus does not. */
+:focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+}
+
+/* Utility: horizontally scrollable regions (tables, charts) keep a subtle
+   scrollbar rather than the heavy default on Windows. */
+.scroll-x {
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.scroll-x::-webkit-scrollbar,
+.scroll-y::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+}
+
+.scroll-x::-webkit-scrollbar-thumb,
+.scroll-y::-webkit-scrollbar-thumb {
+    background: var(--color-ink-300);
+    border-radius: 999px;
+}
+
+.scroll-y {
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+@keyframes ms-fade-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes ms-slide-up {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes ms-slide-in-right {
+    from {
+        opacity: 0;
+        transform: translateX(16px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes ms-shimmer {
+    100% {
+        transform: translateX(100%);
+    }
+}
+
+.animate-fade-in {
+    animation: ms-fade-in 0.15s ease-out;
+}
+
+.animate-slide-up {
+    animation: ms-slide-up 0.2s ease-out;
+}
+
+.animate-slide-in-right {
+    animation: ms-slide-in-right 0.2s ease-out;
+}
+
+.skeleton {
+    position: relative;
+    overflow: hidden;
+    background: var(--color-ink-200);
+}
+
+.skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgb(255 255 255 / 0.6),
+        transparent
+    );
+    animation: ms-shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}

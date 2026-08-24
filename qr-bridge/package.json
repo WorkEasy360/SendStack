@@ -1,0 +1,29 @@
+{
+  "name": "multisender-qr-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted QR/device-linking bridge for MultiSender's WhatsApp connection wizard. Speaks the HTTP contract documented in backend/apps/whatsapp/providers/qr_bridge.py; MultiSender's Django backend never talks to WhatsApp directly for QR accounts.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.19",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.9",
+    "@types/qrcode": "^1.5.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
