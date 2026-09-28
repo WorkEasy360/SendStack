@@ -207,7 +207,7 @@ class TypingAndPresenceTests(Fixture):
     @patch("apps.realtime.events._redis")
     def test_presence_lists_who_is_online(self, mock_redis):
         client = MagicMock()
-        client.scan_iter.return_value = [f"multisender:presence:{self.tenant.pk}:{self.user.pk}".encode()]
+        client.scan_iter.return_value = [f"sendstack:presence:{self.tenant.pk}:{self.user.pk}".encode()]
         mock_redis.return_value = client
 
         response = self.client.get("/api/v1/realtime/presence/")

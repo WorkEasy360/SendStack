@@ -2,7 +2,7 @@ import re
 
 from rest_framework import serializers
 
-from .models import BusinessProfile, TenantBranding
+from .models import BusinessProfile, TenantBranding, TenantSettings
 
 _HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -74,3 +74,75 @@ class BusinessProfileSerializer(serializers.ModelSerializer):
 
     def get_preview(self, obj):
         return obj.to_prompt()
+
+
+class TenantSettingsSerializer(serializers.ModelSerializer):
+    """
+    One workspace's sending and housekeeping preferences.
+
+    `effective_*` are the delays that will actually be used once the
+    deployment defaults are resolved, so the screen can show what a workspace
+    that has set nothing will really do rather than two blank fields.
+    """
+
+    effective_min_delay_seconds = serializers.SerializerMethodField()
+    effective_max_delay_seconds = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TenantSettings
+        fields = (
+            "delay_mode", "min_delay_seconds", "max_delay_seconds",
+            "effective_min_delay_seconds", "effective_max_delay_seconds",
+            "batch_size", "batch_pause_seconds",
+            "sleep_enabled", "sleep_after_messages", "sleep_min_seconds", "sleep_max_seconds",
+            "retry_enabled", "max_retries", "retry_delay_seconds",
+            "campaign_data_retention_days",
+            "updated_at",
+        )
+        read_only_fields = ("effective_min_delay_seconds", "effective_max_delay_seconds", "updated_at")
+
+    def get_effective_min_delay_seconds(self, obj):
+        from apps.campaigns.assignment import resolve_tenant_delay_bounds
+
+        return resolve_tenant_delay_bounds(obj)[0]
+
+    def get_effective_max_delay_seconds(self, obj):
+        from apps.campaigns.assignment import resolve_tenant_delay_bounds
+
+        return resolve_tenant_delay_bounds(obj)[1]
+
+    def validate(self, attrs):
+        def current(field):
+            if field in attrs:
+                return attrs[field]
+            return getattr(self.instance, field, None)
+
+        minimum, maximum = current("min_delay_seconds"), current("max_delay_seconds")
+        if minimum is not None and maximum is not None and maximum < minimum:
+            raise serializers.ValidationError(
+                {"max_delay_seconds": "The longest gap must be at least as long as the shortest."}
+            )
+
+        sleep_min, sleep_max = current("sleep_min_seconds"), current("sleep_max_seconds")
+        if sleep_min is not None and sleep_max is not None and sleep_max < sleep_min:
+            raise serializers.ValidationError(
+                {"sleep_max_seconds": "The longest break must be at least as long as the shortest."}
+            )
+
+        if current("sleep_enabled") and not current("sleep_after_messages"):
+            raise serializers.ValidationError(
+                {"sleep_after_messages": "Say how many messages to send before taking a break."}
+            )
+
+        # Capped rather than rejected out of hand: MAX_SEND_RETRIES is the
+        # worker's own ceiling, and a workspace asking for more would be
+        # configuring something the task cannot honour.
+        from apps.messaging.tasks import MAX_SEND_RETRIES
+
+        retries = current("max_retries")
+        if retries is not None and retries > MAX_SEND_RETRIES:
+            raise serializers.ValidationError(
+                {"max_retries": f"At most {MAX_SEND_RETRIES} retries are possible."}
+            )
+
+        return attrs

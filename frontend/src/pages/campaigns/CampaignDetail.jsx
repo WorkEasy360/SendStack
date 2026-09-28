@@ -20,6 +20,7 @@ import useSelection from "../../hooks/useSelection";
 import { downloadFile } from "../../utils/download";
 import Button from "../../components/ui/Button";
 import Alert from "../../components/ui/Alert";
+import SendPreview from "../../components/campaigns/SendPreview";
 import Card, { CardHeader } from "../../components/ui/Card";
 import DataTable from "../../components/ui/DataTable";
 import BulkActionBar from "../../components/ui/BulkActionBar";
@@ -110,7 +111,11 @@ export default function CampaignDetail() {
     const [recipientPage, setRecipientPage] = useState(1);
     const recipientSelection = useSelection(recipients);
     const [recipientCount, setRecipientCount] = useState(0);
-    const [estimate, setEstimate] = useState(null);
+    // The full pre-send picture -- eligible, skipped by reason, credits,
+    // blockers -- rather than the bare recipient count this used to show.
+    // Every number in it is the server's; see components/campaigns/SendPreview.
+    const [preview, setPreview] = useState(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
     const [error, setError] = useState("");
     const [actionError, setActionError] = useState("");
     const [busy, setBusy] = useState(false);
@@ -138,8 +143,13 @@ export default function CampaignDetail() {
             const campaignRes = await api.get(`/campaigns/campaigns/${id}/`);
             setCampaign(campaignRes.data);
             if (campaignRes.data.status === "DRAFT" || campaignRes.data.status === "SCHEDULED") {
-                const estimateRes = await api.get(`/campaigns/campaigns/${id}/estimate/`);
-                setEstimate(estimateRes.data.estimated_recipients);
+                setPreviewLoading(true);
+                try {
+                    const previewRes = await api.get(`/campaigns/campaigns/${id}/preview/`);
+                    setPreview(previewRes.data);
+                } finally {
+                    setPreviewLoading(false);
+                }
             } else {
                 const [reportRes, recipientsRes] = await Promise.all([
                     api.get(`/reports/campaigns/${id}/`),
@@ -346,10 +356,8 @@ export default function CampaignDetail() {
 
             <Alert>{actionError}</Alert>
 
-            {estimate !== null && (
-                <Alert tone="info" title="Ready to launch">
-                    This campaign will send to an estimated {estimate} contact{estimate === 1 ? "" : "s"}.
-                </Alert>
+            {(preview || previewLoading) && (
+                <SendPreview preview={preview} loading={previewLoading} />
             )}
 
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6">

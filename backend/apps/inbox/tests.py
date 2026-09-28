@@ -1,7 +1,10 @@
+from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.contacts.models import Contact
@@ -413,3 +416,130 @@ class ButtonReplyIngestionTests(TestCase):
         message = services.record_inbound_message(_inbound_event(self.account, message_id="wamid.b.4"))
 
         self.assertEqual(message.replied_button_id, "")
+
+
+class ReplayInboundEventsCommandTests(TestCase):
+    """
+    Recovering inbound messages that were stored but never ingested.
+
+    The events these read from are the only record left of a message the
+    platform received and never showed anyone, so the command has to turn them
+    into a conversation without also acting on them a week late.
+    """
+
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Replay", slug="replay-inbox", kind=Tenant.Kind.CUSTOMER)
+        self.user = get_user_model().objects.create_user(username="replay-owner", password="x", tenant=self.tenant)
+        self.account = _connected_account(self.tenant, self.user)
+
+    def _unprocessed(self, **kwargs):
+        event = _inbound_event(self.account, **kwargs)
+        event.processed_at = None
+        event.save(update_fields=["processed_at"])
+        return event
+
+    def test_recovers_an_unprocessed_event_into_the_inbox(self):
+        event = self._unprocessed(from_number="15550001111", message_id="wamid.stranded.1")
+
+        call_command("replay_inbound_events", stdout=StringIO())
+
+        contact = Contact.objects.get(tenant=self.tenant, phone="+15550001111")
+        conversation = Conversation.objects.get(contact=contact)
+        self.assertEqual(conversation.messages.filter(direction=Message.Direction.INBOUND).count(), 1)
+        event.refresh_from_db()
+        self.assertIsNotNone(event.processed_at)
+
+    def test_leaves_already_processed_events_alone(self):
+        event = _inbound_event(self.account, message_id="wamid.done.1")
+        event.processed_at = timezone.now()
+        event.save(update_fields=["processed_at"])
+
+        out = StringIO()
+        call_command("replay_inbound_events", stdout=out)
+
+        self.assertIn("No unprocessed inbound events", out.getvalue())
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_does_not_run_automation_by_default(self):
+        """A message from last week must not be answered as if it just arrived."""
+        self._unprocessed(message_id="wamid.stranded.2")
+
+        with patch("apps.automation.receivers.services.start_workflows_for") as start:
+            call_command("replay_inbound_events", stdout=StringIO())
+
+        start.assert_not_called()
+
+    def test_notify_reconnects_the_automation_receiver(self):
+        """
+        --notify must leave the ladder wired up afterwards, not just during.
+
+        The receivers are disconnected around the replay, so a failure to
+        restore them would silently disable auto-replies for the whole process
+        -- which on a worker means until it is restarted.
+        """
+        self._unprocessed(message_id="wamid.stranded.3")
+
+        call_command("replay_inbound_events", "--notify", stdout=StringIO())
+
+        from apps.automation.receivers import evaluate_automation_rules
+        from apps.inbox.signals import inbound_message_recorded
+
+        receivers = [r[1]() for r in inbound_message_recorded.receivers]
+        self.assertIn(evaluate_automation_rules, receivers)
+
+    def test_restores_receivers_even_when_a_replay_raises(self):
+        self._unprocessed(message_id="wamid.stranded.4")
+
+        with patch("apps.inbox.management.commands.replay_inbound_events.record_inbound_message") as record:
+            record.side_effect = RuntimeError("boom")
+            with self.assertRaises(RuntimeError):
+                call_command("replay_inbound_events", stdout=StringIO())
+
+        from apps.automation.receivers import evaluate_automation_rules
+        from apps.inbox.signals import inbound_message_recorded
+
+        receivers = [r[1]() for r in inbound_message_recorded.receivers]
+        self.assertIn(evaluate_automation_rules, receivers)
+
+    def test_dry_run_changes_nothing(self):
+        event = self._unprocessed(message_id="wamid.stranded.5")
+
+        out = StringIO()
+        call_command("replay_inbound_events", "--dry-run", stdout=out)
+
+        self.assertIn("--dry-run", out.getvalue())
+        self.assertEqual(Message.objects.count(), 0)
+        event.refresh_from_db()
+        self.assertIsNone(event.processed_at)
+
+    def test_marks_unusable_events_processed_so_they_stop_being_offered(self):
+        """
+        A legacy payload with no `message` block carries no sender at all.
+
+        Left unstamped it would be reported as recoverable on every future run,
+        which is how a backlog nobody can act on becomes permanent noise.
+        """
+        event = self._unprocessed(message_id="wamid.legacy.1")
+        event.payload = {"id": "wamid.legacy.1", "from": "188510594175053", "type": "image", "body": "hi"}
+        event.save(update_fields=["payload"])
+
+        out = StringIO()
+        call_command("replay_inbound_events", stdout=out)
+
+        self.assertIn("Skipped 1 event", out.getvalue())
+        event.refresh_from_db()
+        self.assertIsNotNone(event.processed_at)
+        self.assertEqual(Contact.objects.count(), 0)
+
+    def test_account_filter_limits_the_replay(self):
+        other_user = get_user_model().objects.create_user(username="replay-other", password="x", tenant=self.tenant)
+        other_account = _connected_account(self.tenant, other_user)
+        self._unprocessed(message_id="wamid.mine.1", from_number="15550002222")
+        theirs = _inbound_event(other_account, message_id="wamid.theirs.1", from_number="15550003333")
+        theirs.processed_at = None
+        theirs.save(update_fields=["processed_at"])
+
+        call_command("replay_inbound_events", "--account", str(self.account.pk), stdout=StringIO())
+
+        self.assertTrue(Contact.objects.filter(phone="+15550002222").exists())
+        self.assertFalse(Contact.objects.filter(phone="+15550003333").exists())

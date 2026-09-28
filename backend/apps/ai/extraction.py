@@ -16,11 +16,12 @@ with a readable message instead of failing to boot.
 
 import csv
 import io
+import json
 import logging
 import os
 import re
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 class ExtractionError(Exception):
@@ -52,6 +53,7 @@ SUPPORTED = {
     ".md": "Text file",
     ".csv": "Spreadsheet",
     ".xlsx": "Spreadsheet",
+    ".json": "JSON",
 }
 
 #: Content types we accept alongside the extension. Browsers and phones are
@@ -71,6 +73,7 @@ PLAUSIBLE_TYPES = {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/octet-stream", "application/zip", "",
     },
+    ".json": {"application/json", "text/json", "text/plain", "application/octet-stream", ""},
 }
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -357,6 +360,103 @@ def extract_xlsx(handle) -> list:
     return sections
 
 
+#: How deep into a nested object the flattener will walk before it stops
+#: describing structure and starts dumping. Deeper than this and the "path" a
+#: label is built from is longer than the value it labels.
+MAX_JSON_DEPTH = 6
+
+
+def _flatten_json(value, path="") -> list:
+    """
+    ``["Label: value", ...]`` for one JSON value, labelled by where it sat.
+
+    The same problem `_rows_to_sections` solves for CSV, and the same answer.
+    A dump of ``{"refund": {"window_days": 30}}`` shares no words with "how
+    long do I have to return this", and the raw braces and quotes are noise a
+    retrieval has to score around. Flattened to "refund window days: 30" it is
+    a sentence about refunds that a question about refunds can find.
+
+    Lists of objects are flattened by position rather than merged, so two
+    products in an array do not have their prices attributed to each other --
+    which is the one mistake in this whole file a customer would be quoted.
+    """
+    label = path.replace("_", " ").replace(".", " ").strip()
+
+    if isinstance(value, dict):
+        if len(path.split(".")) > MAX_JSON_DEPTH:
+            return [f"{label}: {json.dumps(value, ensure_ascii=False)[:500]}"] if label else []
+        lines = []
+        for key, nested in value.items():
+            lines.extend(_flatten_json(nested, f"{path}.{key}" if path else str(key)))
+        return lines
+
+    if isinstance(value, list):
+        if len(path.split(".")) > MAX_JSON_DEPTH:
+            return [f"{label}: {json.dumps(value, ensure_ascii=False)[:500]}"] if label else []
+        # A list of scalars reads better as one sentence than as one line per
+        # element: "sizes: small, medium, large".
+        if value and all(not isinstance(item, (dict, list)) for item in value):
+            joined = ", ".join(str(item) for item in value if item is not None)
+            return [f"{label}: {joined}"] if joined else []
+        lines = []
+        for index, item in enumerate(value[:MAX_ROWS], start=1):
+            lines.extend(_flatten_json(item, f"{path}.{index}" if path else str(index)))
+        return lines
+
+    if value is None or value == "":
+        return []
+    return [f"{label}: {value}" if label else str(value)]
+
+
+def extract_json(handle) -> list:
+    """
+    Read a JSON file as labelled facts.
+
+    A top-level array becomes one section per element (a product catalogue, an
+    FAQ export), because those elements are the units a question is about. A
+    top-level object becomes one section per top-level key, for the same
+    reason -- "shipping" and "returns" are two subjects and a retrieval should
+    be able to return one without the other.
+    """
+    raw = handle.read()
+    if isinstance(raw, bytes):
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                raw = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ExtractionError("That JSON file is not readable text.")
+
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        # The line number is the single most useful thing to hand back here --
+        # it is what turns "fix your file" into an action.
+        raise ExtractionError(f"That file is not valid JSON ({exc}).") from exc
+
+    sections = []
+    if isinstance(data, list):
+        for index, item in enumerate(data[:MAX_ROWS], start=1):
+            lines = _flatten_json(item)
+            if lines:
+                sections.append(Section(clean("\n".join(lines)), heading=f"Item {index}"))
+    elif isinstance(data, dict):
+        for key, value in data.items():
+            lines = _flatten_json(value, str(key))
+            if lines:
+                sections.append(Section(clean("\n".join(lines)), heading=str(key)[:200]))
+    else:
+        text = clean(str(data))
+        if text:
+            sections.append(Section(text))
+
+    if not sections:
+        raise ExtractionError("That JSON file has nothing readable in it.")
+    return sections
+
+
 _EXTRACTORS = {
     ".pdf": extract_pdf,
     ".docx": extract_docx,
@@ -364,6 +464,7 @@ _EXTRACTORS = {
     ".md": extract_text,
     ".csv": extract_csv,
     ".xlsx": extract_xlsx,
+    ".json": extract_json,
 }
 
 

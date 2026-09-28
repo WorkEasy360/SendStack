@@ -2,16 +2,18 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CalendarClock, MessageSquareText, Smartphone, Users } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
-import { toMediaItems, primaryMessageType } from "../../utils/media";
+import { toMediaItems } from "../../utils/media";
 import { toButtons } from "../../utils/buttons";
 import Button from "../../components/ui/Button";
+import PasteImport from "../../components/contacts/PasteImport";
 import Alert from "../../components/ui/Alert";
 import Card from "../../components/ui/Card";
 import PageHeader from "../../components/ui/PageHeader";
 import Spinner from "../../components/ui/Spinner";
-import MediaPicker from "../../components/ui/MediaPicker";
-import ButtonBuilder, { ButtonPreview } from "../../components/ui/ButtonBuilder";
-import { CheckboxField, Field, Input, Select, Textarea, Toggle } from "../../components/ui/Field";
+import { ButtonPreview } from "../../components/ui/ButtonBuilder";
+import TemplateEditor from "../templates/TemplateEditor";
+import { contentPayload } from "../../utils/interactive";
+import { CheckboxField, Field, Input, Select, Toggle } from "../../components/ui/Field";
 import { ACCOUNT_TYPE_LABEL } from "../../constants/whatsapp";
 
 const EMPTY_FORM = {
@@ -25,6 +27,8 @@ const EMPTY_FORM = {
     message_body: "",
     media_items: [],
     buttons: [],
+    list_content: {},
+    poll_content: {},
     append_opt_out: true,
     track_links: true,
     audience_type: "ALL",
@@ -39,7 +43,7 @@ function Step({ number, icon: Icon, title, description, children }) {
     return (
         <Card className="mb-4">
             <div className="flex items-start gap-3 mb-5">
-                <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-white flex items-center justify-center">
+                <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-ink-50 flex items-center justify-center">
                     <Icon size={17} aria-hidden="true" />
                 </span>
                 <div className="min-w-0">
@@ -66,6 +70,10 @@ export default function CampaignWizard() {
     const [groups, setGroups] = useState([]);
     const [tags, setTags] = useState([]);
     const [segments, setSegments] = useState([]);
+    // What the composer needs to do its job: which variables this workspace's
+    // contacts carry, and what each connected number can actually deliver.
+    const [variables, setVariables] = useState({ builtin: [], custom: [] });
+    const [accountCapabilities, setAccountCapabilities] = useState([]);
     const [loading, setLoading] = useState(true);
     const [form, setForm] = useState(() =>
         handedAudience
@@ -73,6 +81,11 @@ export default function CampaignWizard() {
             : EMPTY_FORM
     );
     const [useTemplate, setUseTemplate] = useState(true);
+    // A fixed list of contacts needs a sentence saying where it came from --
+    // a retarget handed over from a report, or a list somebody pasted in --
+    // because "412 contacts" on its own is not something anyone can check.
+    const [audienceLabel, setAudienceLabel] = useState(handedAudience?.audienceLabel || "");
+    const [pasteOpen, setPasteOpen] = useState(false);
     const [error, setError] = useState("");
     const [saving, setSaving] = useState(false);
 
@@ -93,7 +106,59 @@ export default function CampaignWizard() {
             })
             .catch((err) => setError(apiErrorMessage(err, "Unable to load campaign setup data.")))
             .finally(() => setLoading(false));
+
+        // Neither is essential to building a campaign, so a failure on either
+        // leaves the composer working with a fixed variable list and no
+        // per-number preview rather than blocking the wizard.
+        api.get("/templates/templates/variables/")
+            .then((response) => setVariables(response.data))
+            .catch(() => {});
+        api.get("/whatsapp/accounts/capabilities/")
+            .then((response) => setAccountCapabilities(response.data.accounts || []))
+            .catch(() => {});
     }, []);
+
+    // "Paste a list" is an option on this screen and not a value the API has:
+    // a pasted list becomes CONTACT_IDS the moment its numbers are resolved to
+    // contacts, and until then the audience is left exactly as it was. So the
+    // selector can never hold a value the campaign could not be saved with,
+    // and closing the paste box without importing changes nothing.
+    const chooseAudience = (value) => {
+        if (value === "PASTE") {
+            setPasteOpen(true);
+            return;
+        }
+        setForm({ ...form, audience_type: value });
+    };
+
+    // What the audience step says about a pasted list once its numbers are
+    // contacts. The unsubscribed count is the part that has to be said out
+    // loud: those rows are in the list and will still not be messaged, and a
+    // send that quietly reaches 47 of 50 is the kind of thing people find out
+    // from a report the next day.
+    const describePaste = (result) => {
+        const known = result.updated + result.unchanged;
+        const parts = [];
+        if (result.created) parts.push(`${result.created} added to your contacts`);
+        if (known) parts.push(`${known} already in your contacts`);
+        if (result.unsubscribed) parts.push(`${result.unsubscribed} unsubscribed and will be skipped`);
+        if (result.errors?.length) parts.push(`${result.errors.length} could not be used`);
+        return parts.length ? `Pasted list — ${parts.join(", ")}.` : "A list you pasted in.";
+    };
+
+    const usePastedAudience = (result) => {
+        setPasteOpen(false);
+        if (!result.contact_ids?.length) {
+            setError("None of those numbers could be used as an audience.");
+            return;
+        }
+        setAudienceLabel(describePaste(result));
+        setForm({
+            ...form,
+            audience_type: "CONTACT_IDS",
+            audience_contact_ids: result.contact_ids,
+        });
+    };
 
     const submit = async (event) => {
         event.preventDefault();
@@ -125,7 +190,10 @@ export default function CampaignWizard() {
             // The API mirrors media_url/filename/caption from the first
             // attachment, so the list is all this form has to send.
             payload.media_items = form.media_items;
-            payload.buttons = form.buttons;
+            // Every content kind is sent, including the empty ones -- see
+            // contentPayload. Omitting one would leave a previously chosen
+            // menu or poll in place and have the save refused for carrying two.
+            Object.assign(payload, contentPayload(form));
         }
         if (form.audience_type === "GROUP") payload.audience_group = form.audience_group;
         if (form.audience_type === "TAG") payload.audience_tag = form.audience_tag;
@@ -146,6 +214,18 @@ export default function CampaignWizard() {
 
     const connectedAccounts = accounts.filter((a) => a.status === "CONNECTED");
     const selectedTemplate = templates.find((t) => String(t.id) === String(form.template));
+    // The campaign's inline content in the shape the shared composer takes.
+    // `name` is absent -- the campaign already has one, from step 1.
+    const inlineForm = {
+        name: "",
+        message_type: form.message_type,
+        body: form.message_body,
+        media_items: form.media_items,
+        buttons: form.buttons,
+        list_content: form.list_content,
+        poll_content: form.poll_content,
+        variables: {},
+    };
     const isAutoMode = form.account_assignment_mode === "AUTO";
     const delayError =
         form.min_delay_seconds !== "" &&
@@ -232,7 +312,7 @@ export default function CampaignWizard() {
                                     {form.audience_contact_ids.length === 1 ? "" : "s"}
                                 </p>
                                 <p className="text-xs text-ink-500 mt-0.5 mb-0">
-                                    {handedAudience?.audienceLabel || "A fixed list of contacts."}
+                                    {audienceLabel || "A fixed list of contacts."}
                                 </p>
                             </div>
                             <Button
@@ -240,9 +320,10 @@ export default function CampaignWizard() {
                                 size="xs"
                                 variant="ghost"
                                 className="shrink-0"
-                                onClick={() =>
-                                    setForm({ ...form, audience_type: "ALL", audience_contact_ids: [] })
-                                }
+                                onClick={() => {
+                                    setAudienceLabel("");
+                                    setForm({ ...form, audience_type: "ALL", audience_contact_ids: [] });
+                                }}
                             >
                                 Choose a different audience
                             </Button>
@@ -250,14 +331,12 @@ export default function CampaignWizard() {
                     ) : (
                     <>
                     <Field label="Send to" className={form.audience_type === "ALL" ? "mb-0" : ""}>
-                        <Select
-                            value={form.audience_type}
-                            onChange={(e) => setForm({ ...form, audience_type: e.target.value })}
-                        >
+                        <Select value={form.audience_type} onChange={(e) => chooseAudience(e.target.value)}>
                             <option value="ALL">All subscribed contacts</option>
                             <option value="GROUP">A group</option>
                             <option value="TAG">A tag</option>
                             <option value="SEGMENT">A saved segment</option>
+                            <option value="PASTE">Numbers I paste in</option>
                         </Select>
                     </Field>
                     {form.audience_type === "GROUP" && (
@@ -369,47 +448,27 @@ export default function CampaignWizard() {
                         </>
                     ) : (
                         <>
-                            <Field
-                                label="Message Type"
-                                hint={
-                                    form.media_items.length > 0 ? "Set by the first attachment below." : undefined
-                                }
-                            >
-                                <Select
-                                    value={form.message_type}
-                                    disabled={form.media_items.length > 0}
-                                    onChange={(e) => setForm({ ...form, message_type: e.target.value })}
-                                >
-                                    <option value="TEXT">Text</option>
-                                    <option value="IMAGE">Image</option>
-                                    <option value="VIDEO">Video</option>
-                                    <option value="DOCUMENT">Document</option>
-                                </Select>
-                            </Field>
-                            <Field label="Message" hint="Use [Name] etc. for personalization." required>
-                                <Textarea
-                                    value={form.message_body}
-                                    onChange={(e) => setForm({ ...form, message_body: e.target.value })}
-                                    required
-                                />
-                            </Field>
-                            <MediaPicker
-                                value={form.media_items}
-                                onChange={(media_items) =>
+                            {/* The same composer the template editor uses,
+                                pointed at the campaign's own fields. A one-off
+                                campaign message can be anything a template can
+                                be, and having two composers would mean two
+                                places for the content rules to drift. */}
+                            <TemplateEditor
+                                form={inlineForm}
+                                onChange={(next) =>
                                     setForm({
                                         ...form,
-                                        media_items,
-                                        message_type: primaryMessageType(
-                                            media_items,
-                                            media_items.length ? form.message_type : "TEXT"
-                                        ),
+                                        message_body: next.body,
+                                        message_type: next.message_type,
+                                        media_items: next.media_items,
+                                        buttons: next.buttons,
+                                        list_content: next.list_content,
+                                        poll_content: next.poll_content,
                                     })
                                 }
-                            />
-                            <ButtonBuilder
-                                value={form.buttons}
-                                onChange={(buttons) => setForm({ ...form, buttons })}
-                                hint="Shown under the message. Answer a tap with a button-triggered rule on the Automation page."
+                                accounts={accountCapabilities}
+                                variables={variables}
+                                nameField={false}
                             />
                         </>
                     )}
@@ -502,6 +561,25 @@ export default function CampaignWizard() {
                     </Button>
                 </div>
             </form>
+
+            {/* Outside the wizard's own form: a nested <form> would submit the
+                campaign every time somebody pressed Enter in the paste box.
+                The same importer the Contacts page uses, so a list is read,
+                reviewed and committed by one set of rules wherever it is
+                pasted -- only the words change. */}
+            {pasteOpen && (
+                <PasteImport
+                    groups={groups}
+                    tags={tags}
+                    title="Paste your audience"
+                    description="One number per line, or a name and a number. New numbers are added to your contacts, so replies, opt-outs and reports have somewhere to live."
+                    submitLabel={(count) =>
+                        `Send to ${count.toLocaleString()} number${count === 1 ? "" : "s"}`
+                    }
+                    onClose={() => setPasteOpen(false)}
+                    onImported={usePastedAudience}
+                />
+            )}
         </div>
     );
 }

@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { Eye, FileText, Pencil, Plus, Power, PowerOff, Trash2 } from "lucide-react";
+import { Braces, Eye, FileText, Pencil, Plus, Power, PowerOff, Trash2 } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
 import { runBulk, describeBulkFailures } from "../../services/bulk";
-import { toMediaItems, primaryMessageType } from "../../utils/media";
-import { toButtons } from "../../utils/buttons";
+import { contentKind } from "../../utils/interactive";
 import useSelection from "../../hooks/useSelection";
 import Button from "../../components/ui/Button";
 import Alert from "../../components/ui/Alert";
@@ -14,14 +13,17 @@ import PageHeader from "../../components/ui/PageHeader";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import { CardGridSkeleton } from "../../components/ui/Skeleton";
 import BulkActionBar from "../../components/ui/BulkActionBar";
-import MediaPicker from "../../components/ui/MediaPicker";
-import ButtonBuilder, { ButtonPreview } from "../../components/ui/ButtonBuilder";
-import { Checkbox, Field, Input, Select, Textarea } from "../../components/ui/Field";
+import WhatsAppPreview from "../../components/ui/WhatsAppPreview";
+import TemplateApiPanel from "../../components/ui/TemplateApiPanel";
+import TemplateEditor, { EMPTY_TEMPLATE, formToPayload, templateToForm } from "./TemplateEditor";
+import { Checkbox, Field, Textarea } from "../../components/ui/Field";
 import { useToast } from "../../components/ui/Toast";
 
-const EMPTY_FORM = { name: "", message_type: "TEXT", body: "", media_items: [], buttons: [] };
-
 const TYPE_TONE = { TEXT: "gray", IMAGE: "blue", VIDEO: "violet", DOCUMENT: "amber" };
+
+/** How each content kind is labelled on a template card. */
+const KIND_TONE = { TEXT: "gray", BUTTON: "blue", LIST: "violet", POLL: "green" };
+const KIND_LABEL = { TEXT: "Text", BUTTON: "Buttons", LIST: "Menu", POLL: "Poll" };
 
 export default function Templates() {
     const toast = useToast();
@@ -31,7 +33,7 @@ export default function Templates() {
 
     const [showModal, setShowModal] = useState(false);
     const [editing, setEditing] = useState(null);
-    const [form, setForm] = useState(EMPTY_FORM);
+    const [form, setForm] = useState(EMPTY_TEMPLATE);
     const [formError, setFormError] = useState("");
     const [saving, setSaving] = useState(false);
     const [pendingDelete, setPendingDelete] = useState(null);
@@ -40,11 +42,23 @@ export default function Templates() {
     const [bulkBusy, setBulkBusy] = useState(false);
     const selection = useSelection(templates);
 
+    // Which template's API JSON is open. Held separately from `preview`
+    // because the two modals answer different questions -- "what will my
+    // customer see?" and "what do I POST to send this?" -- and somebody
+    // usually wants one or the other, not both at once.
+    const [apiFor, setApiFor] = useState(null);
+
     const [preview, setPreview] = useState(null);
     const [previewSample, setPreviewSample] = useState("{}");
     const [previewResult, setPreviewResult] = useState(null);
     const [previewError, setPreviewError] = useState("");
     const [previewing, setPreviewing] = useState(false);
+
+    // The composer needs both to do its job: which variables this workspace's
+    // own contacts actually carry, and what each connected number can deliver.
+    // Fetched once here rather than per keystroke in the editor.
+    const [variables, setVariables] = useState({ builtin: [], custom: [] });
+    const [accounts, setAccounts] = useState([]);
 
     const load = async () => {
         setLoading(true);
@@ -60,26 +74,27 @@ export default function Templates() {
 
     useEffect(() => {
         load();
+        // Neither is essential to editing a template, so a failure on either
+        // leaves the composer working with a fixed variable list and no
+        // per-number preview rather than blocking the page.
+        api.get("/templates/templates/variables/")
+            .then((response) => setVariables(response.data))
+            .catch(() => {});
+        api.get("/whatsapp/accounts/capabilities/")
+            .then((response) => setAccounts(response.data.accounts || []))
+            .catch(() => {});
     }, []);
 
     const openCreate = () => {
         setEditing(null);
-        setForm(EMPTY_FORM);
+        setForm(EMPTY_TEMPLATE);
         setFormError("");
         setShowModal(true);
     };
 
     const openEdit = (template) => {
         setEditing(template);
-        setForm({
-            name: template.name,
-            message_type: template.message_type,
-            body: template.body,
-            // Hydrated through toMediaItems so a template saved with the old
-            // single media_url opens with that file already attached.
-            media_items: toMediaItems(template),
-            buttons: toButtons(template),
-        });
+        setForm(templateToForm(template));
         setFormError("");
         setShowModal(true);
     };
@@ -89,10 +104,15 @@ export default function Templates() {
         setFormError("");
         setSaving(true);
         try {
+            // Every content kind is sent, including the empty ones: switching
+            // a template from a menu to a poll has to *clear* the menu, and
+            // omitting the field would leave the old one in place and have the
+            // save refused for carrying two.
+            const payload = formToPayload(form);
             if (editing) {
-                await api.patch(`/templates/templates/${editing.id}/`, form);
+                await api.patch(`/templates/templates/${editing.id}/`, payload);
             } else {
-                await api.post("/templates/templates/", form);
+                await api.post("/templates/templates/", payload);
             }
             setShowModal(false);
             toast.success(editing ? "Template updated." : "Template created.");
@@ -102,16 +122,6 @@ export default function Templates() {
         } finally {
             setSaving(false);
         }
-    };
-
-    const setMedia = (media_items) => {
-        // The API derives message_type from the first attachment, so the form
-        // shows the same thing rather than a type the save would overwrite.
-        setForm((previous) => ({
-            ...previous,
-            media_items,
-            message_type: primaryMessageType(media_items, media_items.length ? previous.message_type : "TEXT"),
-        }));
     };
 
     const runBulkAction = async (action) => {
@@ -245,7 +255,7 @@ export default function Templates() {
                     {templates.map((template) => (
                         <div
                             key={template.id}
-                            className={`bg-white border rounded-card shadow-card p-5 flex flex-col transition-colors ${
+                            className={`bg-surface border rounded-card shadow-card p-5 flex flex-col transition-colors ${
                                 selection.isSelected(template.id)
                                     ? "border-brand-400 ring-1 ring-brand-500/20"
                                     : "border-ink-200 hover:border-ink-300"
@@ -260,7 +270,20 @@ export default function Templates() {
                                 />
                                 <h3 className="text-sm font-bold text-ink-900 m-0 truncate flex-1">{template.name}</h3>
                                 {!template.is_active && <Badge tone="gray">Paused</Badge>}
-                                <Badge tone={TYPE_TONE[template.message_type] || "gray"}>{template.message_type}</Badge>
+                                {/* Two different facts: what kind of message
+                                    this is, and what it carries. A menu with a
+                                    picture is both, and collapsing them into
+                                    one badge would hide whichever lost. */}
+                                {contentKind(template) !== "TEXT" && (
+                                    <Badge tone={KIND_TONE[contentKind(template)]}>
+                                        {KIND_LABEL[contentKind(template)]}
+                                    </Badge>
+                                )}
+                                {template.message_type !== "TEXT" && (
+                                    <Badge tone={TYPE_TONE[template.message_type] || "gray"}>
+                                        {template.message_type}
+                                    </Badge>
+                                )}
                             </div>
 
                             <p className="text-sm text-ink-600 line-clamp-3 mb-3 flex-1 whitespace-pre-wrap">
@@ -287,7 +310,7 @@ export default function Templates() {
                                             key={variable}
                                             className="text-xs font-mono bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded"
                                         >
-                                            [{variable}]
+                                            {`{{${variable}}}`}
                                         </span>
                                     ))}
                                 </div>
@@ -296,6 +319,15 @@ export default function Templates() {
                             <div className="flex gap-2 pt-3 border-t border-ink-100">
                                 <Button variant="secondary" size="sm" icon={Eye} onClick={() => openPreview(template)}>
                                     Preview
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    icon={Braces}
+                                    onClick={() => setApiFor(template)}
+                                    title="The JSON to send this template through the API"
+                                >
+                                    API JSON
                                 </Button>
                                 <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(template)}>
                                     Edit
@@ -317,48 +349,25 @@ export default function Templates() {
 
             {showModal && (
                 <Modal
-                    title={editing ? "Edit Template" : "New Template"}
-                    description="Use [Name], [OrderID] and similar placeholders for personalization."
+                    title={editing ? "Edit template" : "New template"}
+                    description="Pick a message type, fill in what it needs, and watch it build on the right."
+                    width="max-w-5xl"
                     onClose={() => setShowModal(false)}
                 >
                     <form onSubmit={save}>
                         <Alert>{formError}</Alert>
-                        <Field label="Name" required>
-                            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus required />
-                        </Field>
-                        <Field
-                            label="Message Type"
-                            hint={
-                                form.media_items.length > 0
-                                    ? "Set by the first attachment below."
-                                    : undefined
-                            }
-                        >
-                            <Select
-                                value={form.message_type}
-                                disabled={form.media_items.length > 0}
-                                onChange={(e) => setForm({ ...form, message_type: e.target.value })}
-                            >
-                                <option value="TEXT">Text</option>
-                                <option value="IMAGE">Image</option>
-                                <option value="VIDEO">Video</option>
-                                <option value="DOCUMENT">Document</option>
-                            </Select>
-                        </Field>
-                        <Field label="Message" hint="Use [Name], [OrderID], etc. for personalization variables." required>
-                            <Textarea value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} required />
-                        </Field>
-                        <MediaPicker value={form.media_items} onChange={setMedia} />
-                        <ButtonBuilder
-                            value={form.buttons}
-                            onChange={(buttons) => setForm({ ...form, buttons })}
+                        <TemplateEditor
+                            form={form}
+                            onChange={setForm}
+                            accounts={accounts}
+                            variables={variables}
                         />
-                        <div className="flex gap-2 justify-end">
+                        <div className="flex gap-2 justify-end border-t border-ink-100 pt-4">
                             <Button type="button" variant="secondary" onClick={() => setShowModal(false)}>
                                 Cancel
                             </Button>
                             <Button type="submit" loading={saving}>
-                                {editing ? "Save Changes" : "Create Template"}
+                                {editing ? "Save changes" : "Create template"}
                             </Button>
                         </div>
                     </form>
@@ -380,18 +389,32 @@ export default function Templates() {
                         Render Preview
                     </Button>
                     {previewResult && (
-                        <div className="rounded-xl bg-ink-100 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-ink-400 m-0 mb-2">
-                                WhatsApp preview
-                            </p>
-                            <div className="max-w-[85%] ml-auto">
-                                <div className="bg-brand-600 text-white rounded-2xl rounded-br-sm px-3.5 py-2.5 text-sm whitespace-pre-wrap">
-                                    {previewResult.body}
-                                </div>
-                                <ButtonPreview buttons={preview.buttons} className="mt-1" />
-                            </div>
-                        </div>
+                        // The server rendered the variables against the sample
+                        // data; the same bubble the composer draws renders the
+                        // result, so a preview here and a preview while editing
+                        // cannot look like two different products.
+                        <WhatsAppPreview
+                            form={{
+                                body: previewResult.body,
+                                media_items: previewResult.media_items || [],
+                                buttons: previewResult.buttons || [],
+                                list_content: previewResult.list_content || {},
+                                poll_content: previewResult.poll_content || {},
+                                variables: {},
+                            }}
+                        />
                     )}
+                </Modal>
+            )}
+
+            {apiFor && (
+                <Modal
+                    title={`API JSON: ${apiFor.name}`}
+                    description="Send this template from your own software. Everything below is generated from the template itself, so it matches what the API accepts."
+                    width="max-w-3xl"
+                    onClose={() => setApiFor(null)}
+                >
+                    <TemplateApiPanel templateId={apiFor.id} />
                 </Modal>
             )}
 

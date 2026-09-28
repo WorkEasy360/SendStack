@@ -14,7 +14,7 @@ from .models import WhatsAppAccount, WhatsAppWebhookEvent
 from .providers import get_provider, get_provider_by_name
 from .signals import webhook_event_stored
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 class WhatsAppWebhookView(APIView):
@@ -79,7 +79,7 @@ class WhatsAppConnectionWebhookView(APIView):
     Provider-level webhook for connection-lifecycle events (QR bridge only
     today): pairing confirmed, session expired/errored. Looked up by
     session_id rather than account_id since the bridge only knows the
-    session it created, not MultiSender's account id.
+    session it created, not SendStack's account id.
     """
 
     authentication_classes = []

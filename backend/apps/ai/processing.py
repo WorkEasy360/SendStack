@@ -18,7 +18,7 @@ from django.utils import timezone
 from . import extraction, knowledge
 from .models import KnowledgeDocument
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def _finish(document, status, *, error="", chunks=0, pages=0):

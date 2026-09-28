@@ -17,6 +17,7 @@ class WhatsAppAccountAdmin(admin.ModelAdmin):
         "user",
         "last_connected_at",
         "created_at",
+        "archived_at",
     )
 
     list_filter = (
@@ -25,6 +26,12 @@ class WhatsAppAccountAdmin(admin.ModelAdmin):
         "connection_method",
         "provider",
     )
+
+    def get_queryset(self, request):
+        # `all_objects`, so support can still see a device the user deleted
+        # that had send history behind it -- the default manager hides those
+        # from the product on purpose. See WhatsAppAccount.archived_at.
+        return WhatsAppAccount.all_objects.all()
 
     search_fields = (
         "name",

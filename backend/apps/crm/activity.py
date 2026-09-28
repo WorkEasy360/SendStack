@@ -12,7 +12,7 @@ import logging
 
 from .models import Activity
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def record(contact, kind, summary, *, actor=None, metadata=None, occurred_at=None) -> Activity | None:

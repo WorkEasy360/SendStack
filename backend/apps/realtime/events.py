@@ -17,7 +17,7 @@ import logging
 import redis
 from django.conf import settings
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # Kept short so a Redis that has gone away cannot hold up the request that is
 # publishing -- an inbound webhook must not wait on the live update.
@@ -70,7 +70,7 @@ def channel(tenant_id) -> str:
     published once, and per-tenant rather than global so no subscriber ever
     receives another customer's traffic to filter out client-side.
     """
-    return f"multisender:rt:{tenant_id}"
+    return f"sendstack:rt:{tenant_id}"
 
 
 def publish(tenant_id, event_type: str, data: dict) -> bool:
@@ -109,7 +109,7 @@ _PRESENCE_TTL_SECONDS = 90
 
 
 def _presence_key(tenant_id, user_id) -> str:
-    return f"multisender:presence:{tenant_id}:{user_id}"
+    return f"sendstack:presence:{tenant_id}:{user_id}"
 
 
 def touch_presence(tenant_id, user_id) -> None:

@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -89,10 +89,12 @@ class SendMessageTaskTests(TestCase):
         self.assertEqual(self.message.error_message, "temporary provider error")
 
     @patch("apps.messaging.services.ConnectionManager.send_text_message")
-    def test_ambiguous_failure_is_terminal_and_never_retried(self, mock_send):
+    def test_ambiguous_failure_becomes_recovery_required_and_is_never_retried(self, mock_send):
         # An ambiguous failure means the provider was reached but never
         # answered, so the message may already be on the recipient's phone.
-        # Retrying it -- even with retries left -- risks a duplicate send.
+        # It is NOT a failure and NOT retried (that risks a duplicate): it
+        # goes to the explicit RECOVERY_REQUIRED state for a human or the
+        # reconciliation sweep to settle.
         mock_send.return_value = SendResult(
             success=False, error="Timed out waiting for the QR provider.", ambiguous=True,
         )
@@ -105,8 +107,11 @@ class SendMessageTaskTests(TestCase):
 
         self.message.refresh_from_db()
         self.assertEqual(mock_send.call_count, 1)
-        self.assertEqual(self.message.status, Message.Status.FAILED)
+        self.assertEqual(self.message.status, Message.Status.RECOVERY_REQUIRED)
         self.assertEqual(self.message.retry_count, 0)
+        self.assertEqual(
+            self.message.failure_reason, Message.FailureReason.DELIVERY_UNCONFIRMED,
+        )
         self.assertIn("not retried", self.message.error_message)
         self.assertLessEqual(len(self.message.error_message), 500)
 
@@ -313,6 +318,7 @@ class MultiAttachmentSendTests(TestCase):
         self.assertTrue(result.success)
         mock_send.assert_called_once_with(
             self.account, "+15551234567", "document", "https://cdn.example.com/invoice.pdf", "Your invoice", "invoice.pdf",
+            operation_id=ANY,
         )
 
     @patch("apps.messaging.services.ConnectionManager.send_media_message")
@@ -362,7 +368,7 @@ class ButtonSendTests(TestCase):
         self.assertTrue(result.success)
         mock_text.assert_not_called()
         mock_interactive.assert_called_once_with(
-            self.account, "+15551234567", "Coming on Friday?", self.buttons
+            self.account, "+15551234567", "Coming on Friday?", self.buttons, operation_id=ANY,
         )
         message.refresh_from_db()
         self.assertEqual(message.provider_message_id, "wamid.i.1")
@@ -415,8 +421,13 @@ class ButtonSendTests(TestCase):
 
         self.assertTrue(result.success)
         mock_interactive.assert_not_called()
+        # The instruction line is part of the message: a bare list leaves the
+        # recipient guessing whether to tap, type the number or type the word,
+        # and only two of those can be resolved back to a button.
         mock_text.assert_called_once_with(
-            self.account, "+15551234567", "Coming on Friday?\n\n1. Yes\n2. No"
+            self.account, "+15551234567",
+            "Coming on Friday?\n\n1. Yes\n2. No\n\nPlease reply with the option number.",
+            operation_id=ANY,
         )
 
     @patch("apps.messaging.services.ConnectionManager.supports_interactive_buttons", return_value=True)

@@ -7,7 +7,7 @@ export function StatCardSkeleton({ count = 4 }) {
     return (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {Array.from({ length: count }).map((_, index) => (
-                <div key={index} className="bg-white border border-ink-200 rounded-card shadow-card p-5">
+                <div key={index} className="bg-surface border border-ink-200 rounded-card shadow-card p-5">
                     <Skeleton className="h-3 w-20 mb-3" />
                     <Skeleton className="h-7 w-14" />
                 </div>
@@ -19,7 +19,7 @@ export function StatCardSkeleton({ count = 4 }) {
 /** Placeholder rows matching the DataTable layout. */
 export function TableSkeleton({ rows = 5, columns = 4 }) {
     return (
-        <div className="bg-white border border-ink-200 rounded-card shadow-card overflow-hidden">
+        <div className="bg-surface border border-ink-200 rounded-card shadow-card overflow-hidden">
             <div className="bg-ink-50 border-b border-ink-200 px-4 py-3 flex gap-4">
                 {Array.from({ length: columns }).map((_, index) => (
                     <Skeleton key={index} className="h-3 flex-1" />
@@ -41,7 +41,7 @@ export function CardGridSkeleton({ count = 4, className = "grid md:grid-cols-2 g
     return (
         <div className={className}>
             {Array.from({ length: count }).map((_, index) => (
-                <div key={index} className="bg-white border border-ink-200 rounded-card shadow-card p-6">
+                <div key={index} className="bg-surface border border-ink-200 rounded-card shadow-card p-6">
                     <Skeleton className="h-4 w-32 mb-3" />
                     <Skeleton className="h-3 w-full mb-2" />
                     <Skeleton className="h-3 w-3/4 mb-5" />

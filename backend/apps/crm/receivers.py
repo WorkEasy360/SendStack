@@ -22,7 +22,7 @@ from . import activity, lifecycle, segments
 from .models import Activity
 from .scoring import score_contact
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @receiver(inbound_message_recorded)

@@ -101,7 +101,7 @@ export default function Branding() {
                     <Input
                         value={form.product_name}
                         onChange={(event) => update({ product_name: event.target.value })}
-                        placeholder={effective?.product_name || "MultiSender"}
+                        placeholder={effective?.product_name || "SendStack"}
                         maxLength={60}
                     />
                 </Field>
@@ -140,7 +140,7 @@ export default function Branding() {
                                 type="color"
                                 value={previewColor || "#059669"}
                                 onChange={(event) => update({ primary_color: event.target.value })}
-                                className="h-10 w-14 cursor-pointer rounded-lg border border-ink-200 bg-white p-1"
+                                className="h-10 w-14 cursor-pointer rounded-lg border border-ink-200 bg-surface p-1"
                                 aria-label="Pick a brand colour"
                             />
                             <Input

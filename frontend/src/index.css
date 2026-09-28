@@ -1,7 +1,10 @@
 @import "tailwindcss";
 
+/* `dark:` for the few places a token swap is not enough. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ------------------------------------------------------------------ *
- * MultiSender design system
+ * SendStack design system
  *
  * Tokens live here and are exposed to Tailwind through @theme, so
  * utilities like `bg-brand-600`, `text-ink-500` and `rounded-card`
@@ -36,6 +39,11 @@
     --color-ink-800: #1e293b;
     --color-ink-900: #0f172a;
 
+    /* Card / input / popover fill. `bg-white` used to do this job, but white
+       is also a real colour (text on a coloured button) that must not flip in
+       dark mode -- so the surface gets its own name. */
+    --color-surface: #ffffff;
+
     --radius-card: 0.875rem;
 
     /* Deliberately light: cards are separated by border first, shadow second. */
@@ -62,12 +70,16 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
-button,
-input,
-select,
-textarea {
-    font: inherit;
-    color: inherit;
+/* In the base layer on purpose. Unlayered, this rule outranks every layered
+   utility, so `text-white` on a button silently lost to `color: inherit`. */
+@layer base {
+    button,
+    input,
+    select,
+    textarea {
+        font: inherit;
+        color: inherit;
+    }
 }
 
 h1,
@@ -75,6 +87,173 @@ h2,
 h3,
 h4 {
     letter-spacing: -0.011em;
+}
+
+/* ------------------------------------------------------------------ *
+ * Dark mode
+ *
+ * The whole UI is written against tokens, so dark mode is a swap of the
+ * tokens rather than a second set of classes:
+ *
+ *   - the ink ramp is inverted (900 is the strongest *text*, 50 the page),
+ *     so `text-ink-900` is near-white and `bg-ink-50` is the page;
+ *   - `surface` (cards, inputs) sits one step above the page;
+ *   - the tinted status colours (50/100/200) become dark tints mixed from the
+ *     colour's own 500, and the text steps (700-900) become light mixes of it.
+ *     400-600 are untouched: they are the solid fills and read on both;
+ *   - a reseller's brand colour flows through the same mixes, because they
+ *     start from `--color-brand-500`.
+ *
+ * Add `theme-static` to anything that must keep its light-mode look in dark
+ * mode (a mock of someone else's UI, a code panel).
+ * ------------------------------------------------------------------ */
+:root.dark {
+    color-scheme: dark;
+
+    --color-surface: #131c31;
+
+    --color-ink-50: #0d1424;
+    --color-ink-100: #18223a;
+    --color-ink-200: #26324d;
+    --color-ink-300: #3a4867;
+    --color-ink-400: #77869e;
+    --color-ink-500: #94a3b8;
+    --color-ink-600: #b3bfcf;
+    --color-ink-700: #cbd5e1;
+    --color-ink-800: #e2e8f0;
+    --color-ink-900: #f1f5f9;
+
+    --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.35);
+    --shadow-raised: 0 4px 16px -2px rgb(0 0 0 / 0.45), 0 2px 4px -2px rgb(0 0 0 / 0.35);
+    --shadow-overlay: 0 24px 48px -12px rgb(0 0 0 / 0.65);
+
+    --color-brand-50: color-mix(in oklab, var(--color-brand-500) 12%, var(--color-surface));
+    --color-brand-100: color-mix(in oklab, var(--color-brand-500) 19%, var(--color-surface));
+    --color-brand-200: color-mix(in oklab, var(--color-brand-500) 30%, var(--color-surface));
+    --color-brand-700: color-mix(in oklab, var(--color-brand-500) 55%, white);
+    --color-brand-800: color-mix(in oklab, var(--color-brand-500) 40%, white);
+    --color-brand-900: color-mix(in oklab, var(--color-brand-500) 26%, white);
+    --color-red-50: color-mix(in oklab, var(--color-red-500) 12%, var(--color-surface));
+    --color-red-100: color-mix(in oklab, var(--color-red-500) 19%, var(--color-surface));
+    --color-red-200: color-mix(in oklab, var(--color-red-500) 30%, var(--color-surface));
+    --color-red-700: color-mix(in oklab, var(--color-red-500) 55%, white);
+    --color-red-800: color-mix(in oklab, var(--color-red-500) 40%, white);
+    --color-red-900: color-mix(in oklab, var(--color-red-500) 26%, white);
+    --color-amber-50: color-mix(in oklab, var(--color-amber-500) 12%, var(--color-surface));
+    --color-amber-100: color-mix(in oklab, var(--color-amber-500) 19%, var(--color-surface));
+    --color-amber-200: color-mix(in oklab, var(--color-amber-500) 30%, var(--color-surface));
+    --color-amber-700: color-mix(in oklab, var(--color-amber-500) 55%, white);
+    --color-amber-800: color-mix(in oklab, var(--color-amber-500) 40%, white);
+    --color-amber-900: color-mix(in oklab, var(--color-amber-500) 26%, white);
+    --color-emerald-50: color-mix(in oklab, var(--color-emerald-500) 12%, var(--color-surface));
+    --color-emerald-100: color-mix(in oklab, var(--color-emerald-500) 19%, var(--color-surface));
+    --color-emerald-200: color-mix(in oklab, var(--color-emerald-500) 30%, var(--color-surface));
+    --color-emerald-700: color-mix(in oklab, var(--color-emerald-500) 55%, white);
+    --color-emerald-800: color-mix(in oklab, var(--color-emerald-500) 40%, white);
+    --color-emerald-900: color-mix(in oklab, var(--color-emerald-500) 26%, white);
+    --color-blue-50: color-mix(in oklab, var(--color-blue-500) 12%, var(--color-surface));
+    --color-blue-100: color-mix(in oklab, var(--color-blue-500) 19%, var(--color-surface));
+    --color-blue-200: color-mix(in oklab, var(--color-blue-500) 30%, var(--color-surface));
+    --color-blue-700: color-mix(in oklab, var(--color-blue-500) 55%, white);
+    --color-blue-800: color-mix(in oklab, var(--color-blue-500) 40%, white);
+    --color-blue-900: color-mix(in oklab, var(--color-blue-500) 26%, white);
+    --color-violet-50: color-mix(in oklab, var(--color-violet-500) 12%, var(--color-surface));
+    --color-violet-100: color-mix(in oklab, var(--color-violet-500) 19%, var(--color-surface));
+    --color-violet-200: color-mix(in oklab, var(--color-violet-500) 30%, var(--color-surface));
+    --color-violet-700: color-mix(in oklab, var(--color-violet-500) 55%, white);
+    --color-violet-800: color-mix(in oklab, var(--color-violet-500) 40%, white);
+    --color-violet-900: color-mix(in oklab, var(--color-violet-500) 26%, white);
+    --color-cyan-50: color-mix(in oklab, var(--color-cyan-500) 12%, var(--color-surface));
+    --color-cyan-100: color-mix(in oklab, var(--color-cyan-500) 19%, var(--color-surface));
+    --color-cyan-200: color-mix(in oklab, var(--color-cyan-500) 30%, var(--color-surface));
+    --color-cyan-700: color-mix(in oklab, var(--color-cyan-500) 55%, white);
+    --color-cyan-800: color-mix(in oklab, var(--color-cyan-500) 40%, white);
+    --color-cyan-900: color-mix(in oklab, var(--color-cyan-500) 26%, white);
+    --color-orange-50: color-mix(in oklab, var(--color-orange-500) 12%, var(--color-surface));
+    --color-orange-100: color-mix(in oklab, var(--color-orange-500) 19%, var(--color-surface));
+    --color-orange-200: color-mix(in oklab, var(--color-orange-500) 30%, var(--color-surface));
+    --color-orange-700: color-mix(in oklab, var(--color-orange-500) 55%, white);
+    --color-orange-800: color-mix(in oklab, var(--color-orange-500) 40%, white);
+    --color-orange-900: color-mix(in oklab, var(--color-orange-500) 26%, white);
+    --color-sky-50: color-mix(in oklab, var(--color-sky-500) 12%, var(--color-surface));
+    --color-sky-100: color-mix(in oklab, var(--color-sky-500) 19%, var(--color-surface));
+    --color-sky-200: color-mix(in oklab, var(--color-sky-500) 30%, var(--color-surface));
+    --color-sky-700: color-mix(in oklab, var(--color-sky-500) 55%, white);
+    --color-sky-800: color-mix(in oklab, var(--color-sky-500) 40%, white);
+    --color-sky-900: color-mix(in oklab, var(--color-sky-500) 26%, white);
+    --color-green-50: color-mix(in oklab, var(--color-green-500) 12%, var(--color-surface));
+    --color-green-100: color-mix(in oklab, var(--color-green-500) 19%, var(--color-surface));
+    --color-green-200: color-mix(in oklab, var(--color-green-500) 30%, var(--color-surface));
+    --color-green-700: color-mix(in oklab, var(--color-green-500) 55%, white);
+    --color-green-800: color-mix(in oklab, var(--color-green-500) 40%, white);
+    --color-green-900: color-mix(in oklab, var(--color-green-500) 26%, white);
+}
+
+/* 600 is a solid fill (primary buttons) *and* a text colour (links, icons).
+   As a fill it has to stay; as text it is too dim on a dark page, so the text
+   use alone steps up to 400. Zero-specificity selector, in the utilities
+   layer, so `hover:text-*` variants still win over it. */
+@layer utilities {
+    :where(:root.dark) .text-brand-600 {
+        color: var(--color-brand-400);
+    }
+    :where(:root.dark) .text-red-600 {
+        color: var(--color-red-400);
+    }
+    :where(:root.dark) .text-amber-600 {
+        color: var(--color-amber-400);
+    }
+    :where(:root.dark) .text-emerald-600 {
+        color: var(--color-emerald-400);
+    }
+    :where(:root.dark) .text-blue-600 {
+        color: var(--color-blue-400);
+    }
+    :where(:root.dark) .text-violet-600 {
+        color: var(--color-violet-400);
+    }
+    :where(:root.dark) .text-cyan-600 {
+        color: var(--color-cyan-400);
+    }
+    :where(:root.dark) .text-orange-600 {
+        color: var(--color-orange-400);
+    }
+    :where(:root.dark) .text-sky-600 {
+        color: var(--color-sky-400);
+    }
+    :where(:root.dark) .text-green-600 {
+        color: var(--color-green-400);
+    }
+}
+
+:root.dark .skeleton::after {
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.06), transparent);
+}
+
+/* The flow canvases carry xyflow's own near-black; keep them on the app's page
+   colour so they do not read as a hole in the layout. */
+:root.dark .react-flow {
+    --xy-background-color-default: var(--color-ink-50);
+}
+
+/* Opts a subtree out of dark mode: restores the light ramp for everything
+   inside it. Inherited custom properties are overridden by a declaration on
+   the element itself, so this wins wherever it is placed. */
+.theme-static {
+    color-scheme: light;
+
+    --color-surface: #ffffff;
+
+    --color-ink-50: #f8fafc;
+    --color-ink-100: #f1f5f9;
+    --color-ink-200: #e2e8f0;
+    --color-ink-300: #cbd5e1;
+    --color-ink-400: #94a3b8;
+    --color-ink-500: #64748b;
+    --color-ink-600: #475569;
+    --color-ink-700: #334155;
+    --color-ink-800: #1e293b;
+    --color-ink-900: #0f172a;
 }
 
 /* Keyboard focus stays visible everywhere; pointer focus does not. */

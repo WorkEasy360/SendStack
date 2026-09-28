@@ -160,6 +160,15 @@ export default function Inbox() {
     const [pendingBulk, setPendingBulk] = useState(null);
     const [bulkBusy, setBulkBusy] = useState(false);
 
+    // Width of the conversation-list column, dragged against the thread pane.
+    // Restored from localStorage so a reload doesn't reset a chosen layout.
+    const [listWidth, setListWidth] = useState(() => {
+        const stored = Number(localStorage.getItem("inbox:list-width"));
+        return stored >= 260 && stored <= 560 ? stored : 340;
+    });
+    const splitRef = useRef(null);
+    const resizingRef = useRef(false);
+
     const threadRef = useRef(null);
     // The poll reads these without having to re-subscribe on every render.
     const selectedIdRef = useRef(null);
@@ -360,6 +369,48 @@ export default function Inbox() {
         }, 1000);
         return () => clearInterval(timer);
     }, [typingBy]);
+
+    // Tracked on window (not the handle) so a fast drag that outruns the
+    // cursor doesn't drop the resize when the pointer leaves the handle.
+    useEffect(() => {
+        const onMove = (event) => {
+            if (!resizingRef.current || !splitRef.current) return;
+            const rect = splitRef.current.getBoundingClientRect();
+            const max = Math.min(560, rect.width - 320);
+            setListWidth(Math.min(max, Math.max(260, event.clientX - rect.left)));
+        };
+        const onUp = () => {
+            if (!resizingRef.current) return;
+            resizingRef.current = false;
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            setListWidth((width) => {
+                localStorage.setItem("inbox:list-width", String(width));
+                return width;
+            });
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        return () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+        };
+    }, []);
+
+    const startResize = (event) => {
+        event.preventDefault();
+        resizingRef.current = true;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+    };
+
+    const nudgeListWidth = (delta) => {
+        setListWidth((width) => {
+            const next = Math.min(560, Math.max(260, width + delta));
+            localStorage.setItem("inbox:list-width", String(next));
+            return next;
+        });
+    };
 
     const manualRefresh = async () => {
         setRefreshing(true);
@@ -627,9 +678,13 @@ export default function Inbox() {
 
             <Alert>{error}</Alert>
 
-            <div className="bg-white border border-ink-200 rounded-card shadow-card overflow-hidden grid lg:grid-cols-[340px_1fr] h-[calc(100vh-15rem)] min-h-[28rem]">
+            <div
+                ref={splitRef}
+                style={{ "--list-w": `${listWidth}px` }}
+                className="bg-surface border border-ink-200 rounded-card shadow-card overflow-hidden grid lg:grid-cols-[var(--list-w)_8px_1fr] h-[calc(100vh-15rem)] min-h-[28rem]"
+            >
                 {/* Conversation list — hidden on mobile once a thread is open. */}
-                <div className={`flex flex-col border-ink-200 lg:border-r min-w-0 ${selected ? "hidden lg:flex" : "flex"}`}>
+                <div className={`flex flex-col border-ink-200 lg:border-r min-w-0 min-h-0 ${selected ? "hidden lg:flex" : "flex"}`}>
                     <div className="p-3 border-b border-ink-200">
                         <form
                             onSubmit={(event) => {
@@ -660,7 +715,7 @@ export default function Inbox() {
                                     onClick={() => applyFilter(entry.id)}
                                     className={`flex-1 rounded-md px-2 py-1.5 text-xs font-semibold cursor-pointer border-none transition-colors ${
                                         filter === entry.id
-                                            ? "bg-white text-ink-900 shadow-card"
+                                            ? "bg-surface text-ink-900 shadow-card"
                                             : "bg-transparent text-ink-500 hover:text-ink-800"
                                     }`}
                                 >
@@ -730,7 +785,7 @@ export default function Inbox() {
                         </div>
                     )}
 
-                    <div className="scroll-y flex-1">
+                    <div className="scroll-y flex-1 min-h-0">
                         {conversations.length === 0 ? (
                             <p className="text-sm text-ink-500 p-4 text-center m-0">
                                 {filter === "all" && !search
@@ -825,8 +880,32 @@ export default function Inbox() {
                     </div>
                 </div>
 
+                {/* Drag to resize the list column; arrow keys nudge it when focused. */}
+                <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize conversation list"
+                    aria-valuenow={listWidth}
+                    aria-valuemin={260}
+                    aria-valuemax={560}
+                    tabIndex={0}
+                    onMouseDown={startResize}
+                    onKeyDown={(event) => {
+                        if (event.key === "ArrowLeft") {
+                            event.preventDefault();
+                            nudgeListWidth(-16);
+                        } else if (event.key === "ArrowRight") {
+                            event.preventDefault();
+                            nudgeListWidth(16);
+                        }
+                    }}
+                    className="hidden lg:flex w-2 shrink-0 cursor-col-resize items-center justify-center bg-transparent hover:bg-ink-100 focus:bg-ink-100 focus:outline-none transition-colors group"
+                >
+                    <span className="w-1 h-8 rounded-full bg-ink-200 group-hover:bg-ink-300" aria-hidden="true" />
+                </div>
+
                 {/* Thread */}
-                <div className={`flex-col overflow-hidden min-w-0 ${selected ? "flex" : "hidden lg:flex"}`}>
+                <div className={`flex-col overflow-hidden min-w-0 min-h-0 ${selected ? "flex" : "hidden lg:flex"}`}>
                     {!selected ? (
                         <div className="flex-1 flex items-center justify-center p-6">
                             <EmptyState
@@ -926,7 +1005,7 @@ export default function Inbox() {
                                                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold cursor-pointer transition-colors ${
                                                     applied
                                                         ? "text-white border-transparent"
-                                                        : "bg-white text-ink-500 border-ink-200 hover:border-ink-300"
+                                                        : "bg-surface text-ink-500 border-ink-200 hover:border-ink-300"
                                                 }`}
                                                 style={applied ? { backgroundColor: label.color } : undefined}
                                             >
@@ -979,7 +1058,7 @@ export default function Inbox() {
                                                     className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-3.5 py-2 text-sm shadow-card ${
                                                         outbound
                                                             ? "bg-brand-600 text-white rounded-br-sm"
-                                                            : "bg-white text-ink-800 border border-ink-200 rounded-bl-sm"
+                                                            : "bg-surface text-ink-800 border border-ink-200 rounded-bl-sm"
                                                     }`}
                                                 >
                                                     {/* One line per attachment: a message can now
@@ -1060,7 +1139,7 @@ export default function Inbox() {
 
                                 {typingBy[selected.id] && (
                                     <div className="flex justify-start">
-                                        <div className="rounded-2xl rounded-bl-sm bg-white border border-ink-200 px-3.5 py-2 shadow-card">
+                                        <div className="rounded-2xl rounded-bl-sm bg-surface border border-ink-200 px-3.5 py-2 shadow-card">
                                             <span className="text-xs text-ink-500">
                                                 {typingBy[selected.id].username} is typing
                                             </span>
@@ -1080,7 +1159,7 @@ export default function Inbox() {
                                 )}
                             </div>
 
-                            <form onSubmit={sendReply} className="shrink-0 border-t border-ink-200 p-3 bg-white">
+                            <form onSubmit={sendReply} className="shrink-0 border-t border-ink-200 p-3 bg-surface">
                                 <Alert>{replyError}</Alert>
                                 {showAttach && (
                                     <div className="mb-2 p-3 rounded-lg bg-ink-50 border border-ink-200">
@@ -1102,7 +1181,7 @@ export default function Inbox() {
                                     </div>
                                 )}
                                 {cannedMatches.length > 0 && (
-                                    <ul className="list-none p-0 m-0 mb-2 rounded-lg border border-ink-200 bg-white shadow-overlay overflow-hidden">
+                                    <ul className="list-none p-0 m-0 mb-2 rounded-lg border border-ink-200 bg-surface shadow-overlay overflow-hidden">
                                         {cannedMatches.map((item, index) => (
                                             <li key={item.id}>
                                                 <button
@@ -1227,7 +1306,7 @@ export default function Inbox() {
                                 </p>
                             </form>
 
-                            <div className="shrink-0 border-t border-ink-200 bg-white">
+                            <div className="shrink-0 border-t border-ink-200 bg-surface">
                                 <button
                                     type="button"
                                     onClick={() => setShowNotes((value) => !value)}
@@ -1360,7 +1439,7 @@ function LabelManager({ labels, onCreate, onClose }) {
                             value={color}
                             onChange={(event) => setColor(event.target.value)}
                             aria-label="Label colour"
-                            className="h-11 w-14 rounded-lg border border-ink-200 bg-white p-1 cursor-pointer"
+                            className="h-11 w-14 rounded-lg border border-ink-200 bg-surface p-1 cursor-pointer"
                         />
                     </Field>
                     <Button type="submit" loading={saving} disabled={!name.trim()}>

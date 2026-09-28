@@ -1,4 +1,8 @@
-FROM node:20-slim AS build
+# 20.19 is a floor, not a preference. The native-flow button engine reaches
+# Baileys through require(), Baileys 6.7.24 is ESM, and require(esm) landed in
+# Node 20.19. On an older 20.x the bridge starts, sends text and media fine, and
+# fails only when a button message is sent. See src/nativeFlow.ts.
+FROM node:20.19-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -7,7 +11,7 @@ COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build
 
-FROM node:20-slim
+FROM node:20.19-slim
 
 ENV NODE_ENV=production \
     QR_BRIDGE_DATA_DIR=/app/data

@@ -24,7 +24,7 @@ from django.utils import timezone
 
 from .models import AccountSendQuota, SendingPolicy, WhatsAppAccount
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @dataclass

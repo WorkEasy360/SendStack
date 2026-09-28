@@ -2,3 +2,8 @@
 
 gunicorn==26.0.0
 whitenoise==6.12.0
+
+# Error monitoring. Optional at runtime -- core.monitoring no-ops when
+# SENTRY_DSN is unset -- but present in the image so a deployment can switch
+# it on with one environment variable rather than a rebuild.
+sentry-sdk==2.21.0

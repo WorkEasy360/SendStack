@@ -14,6 +14,7 @@ from core.media import (
     resolve_media_items,
     spec_from_object,
 )
+from core.sample_media import upload as sample_upload
 
 from .models import MediaAsset, classify
 
@@ -133,9 +134,9 @@ class MediaAssetApiTests(TestCase):
 
     def test_uploads_several_files_in_one_request(self):
         response = self._upload(
-            SimpleUploadedFile("a.png", b"png-bytes", content_type="image/png"),
-            SimpleUploadedFile("b.mp4", b"mp4-bytes", content_type="video/mp4"),
-            SimpleUploadedFile("c.pdf", b"pdf-bytes", content_type="application/pdf"),
+            sample_upload("a.png", content_type="image/png"),
+            sample_upload("b.mp4", content_type="video/mp4"),
+            sample_upload("c.pdf", content_type="application/pdf"),
         )
 
         self.assertEqual(response.status_code, 201, response.content)
@@ -149,7 +150,7 @@ class MediaAssetApiTests(TestCase):
         with override_settings(MEDIA_ROOT=self.media_root):
             response = self.client.post(
                 "/api/v1/media/assets/",
-                {"file": SimpleUploadedFile("solo.png", b"x", content_type="image/png")},
+                {"file": sample_upload("solo.png", content_type="image/png")},
                 format="multipart",
             )
 
@@ -162,12 +163,12 @@ class MediaAssetApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_rejects_oversized_files_without_storing_any_of_them(self):
-        with override_settings(MEDIA_ROOT=self.media_root, MEDIA_ASSET_MAX_UPLOAD_BYTES=8):
+        with override_settings(MEDIA_ROOT=self.media_root, MEDIA_ASSET_MAX_UPLOAD_BYTES=60):
             response = self.client.post(
                 "/api/v1/media/assets/",
                 {"files": [
-                    SimpleUploadedFile("small.png", b"tiny", content_type="image/png"),
-                    SimpleUploadedFile("big.png", b"far-too-many-bytes", content_type="image/png"),
+                    sample_upload("small.gif", content_type="image/gif"),
+                    sample_upload("big.png", content_type="image/png"),
                 ]},
                 format="multipart",
             )
@@ -179,7 +180,7 @@ class MediaAssetApiTests(TestCase):
     def test_listing_is_scoped_to_the_callers_tenant(self):
         other = Tenant.objects.create(name="Other", slug="other-media", kind=Tenant.Kind.CUSTOMER)
         MediaAsset.objects.create(tenant=other, original_filename="theirs.png", kind=MediaAsset.Kind.IMAGE)
-        self._upload(SimpleUploadedFile("mine.png", b"x", content_type="image/png"))
+        self._upload(sample_upload("mine.png", content_type="image/png"))
 
         response = self.client.get("/api/v1/media/assets/")
 
@@ -187,8 +188,8 @@ class MediaAssetApiTests(TestCase):
 
     def test_bulk_delete_removes_every_selected_asset(self):
         created = self._upload(
-            SimpleUploadedFile("a.png", b"x", content_type="image/png"),
-            SimpleUploadedFile("b.png", b"y", content_type="image/png"),
+            sample_upload("a.png", content_type="image/png"),
+            sample_upload("b.png", content_type="image/png"),
         ).json()
 
         with override_settings(MEDIA_ROOT=self.media_root):
@@ -201,7 +202,7 @@ class MediaAssetApiTests(TestCase):
         self.assertEqual(MediaAsset.objects.count(), 0)
 
     def test_bulk_delete_reports_an_id_it_cannot_reach(self):
-        created = self._upload(SimpleUploadedFile("a.png", b"x", content_type="image/png")).json()
+        created = self._upload(sample_upload("a.png", content_type="image/png")).json()
 
         with override_settings(MEDIA_ROOT=self.media_root):
             response = self.client.post(

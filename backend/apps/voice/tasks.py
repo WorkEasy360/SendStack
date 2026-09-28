@@ -5,7 +5,7 @@ from django.utils import timezone
 
 from config.celery import app
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @app.task

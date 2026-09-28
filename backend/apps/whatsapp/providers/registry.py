@@ -42,3 +42,15 @@ def get_provider_by_name(name: str) -> WhatsAppProvider:
     if provider is None:
         raise ProviderError(f"No provider registered for '{name}'.", code="unknown_provider")
     return provider
+
+
+def provider_capabilities() -> dict:
+    """
+    Every registered provider's capabilities, keyed by provider name.
+
+    The composer needs this as well as the per-account answer: somebody with
+    no Cloud API number has to be told that a list *would* work on one, rather
+    than that lists do not work -- the first is a purchase decision and the
+    second is wrong.
+    """
+    return {name: provider.capabilities() for name, provider in _PROVIDERS.items()}

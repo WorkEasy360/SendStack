@@ -42,7 +42,7 @@ function PresetCard({ preset, onChoose, disabled }) {
             type="button"
             disabled={disabled}
             onClick={() => onChoose(preset)}
-            className="text-left bg-white border border-ink-200 rounded-card p-4 shadow-card cursor-pointer transition-colors hover:border-brand-400 disabled:cursor-not-allowed disabled:opacity-60 w-full"
+            className="text-left bg-surface border border-ink-200 rounded-card p-4 shadow-card cursor-pointer transition-colors hover:border-brand-400 disabled:cursor-not-allowed disabled:opacity-60 w-full"
         >
             <div className="flex items-start gap-3">
                 <span className="w-9 h-9 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">

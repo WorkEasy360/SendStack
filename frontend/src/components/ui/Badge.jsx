@@ -33,6 +33,8 @@ const STATUS_TONE = {
     PENDING: "amber",
     PROCESSING: "amber",
     COMPLETED: "green",
+    // Webhook delivery outcomes (Settings -> Developer).
+    SUCCEEDED: "green",
     PAUSED: "gray",
     DRAFT: "gray",
     DISCONNECTED: "gray",

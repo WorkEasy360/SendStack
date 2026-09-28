@@ -7,7 +7,7 @@ def assign_existing_users_to_platform(apps, schema_editor):
     User = apps.get_model("accounts", "User")
     platform, _ = Tenant.objects.get_or_create(
         slug="multisender-platform",
-        defaults={"name": "MultiSender Platform", "kind": "PLATFORM"},
+        defaults={"name": "SendStack Platform", "kind": "PLATFORM"},
     )
     User.objects.filter(tenant__isnull=True).update(tenant=platform)
 

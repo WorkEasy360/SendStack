@@ -29,7 +29,7 @@ export default function Modal({ title, description, onClose, children, footer, w
 
     return (
         <div
-            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-ink-900/50 backdrop-blur-[2px] p-0 sm:p-4 animate-fade-in"
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-[2px] p-0 sm:p-4 animate-fade-in"
             onClick={onClose}
             role="presentation"
         >
@@ -38,7 +38,7 @@ export default function Modal({ title, description, onClose, children, footer, w
                 aria-modal="true"
                 aria-label={typeof title === "string" ? title : undefined}
                 onClick={(event) => event.stopPropagation()}
-                className={`w-full ${WIDTHS[width] || width} bg-white rounded-t-2xl sm:rounded-2xl shadow-overlay max-h-[92vh] sm:max-h-[88vh] flex flex-col animate-slide-up`}
+                className={`w-full ${WIDTHS[width] || width} bg-surface rounded-t-2xl sm:rounded-2xl shadow-overlay max-h-[92vh] sm:max-h-[88vh] flex flex-col animate-slide-up`}
             >
                 <div className="flex items-start justify-between gap-4 px-5 sm:px-6 pt-5 pb-4 border-b border-ink-100">
                     <div className="min-w-0">

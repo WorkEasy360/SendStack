@@ -31,7 +31,7 @@ from django.utils import timezone
 
 from apps.whatsapp.models import WhatsAppAccount
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 #: A generated delay must be strictly greater than zero, so that no two
 #: messages are ever scheduled for the same instant. A campaign configured
@@ -44,20 +44,48 @@ MIN_DELAY_FLOOR_SECONDS = 0.01
 _DELAY_PRECISION = 3
 
 
+def resolve_tenant_delay_bounds(tenant_settings) -> tuple[float, float]:
+    """
+    A workspace's own delay window, resolved against the deployment default.
+
+    Split out from `resolve_delay_bounds` so the settings screen can show what
+    a workspace's preference actually amounts to without inventing a campaign
+    to ask about.
+    """
+    minimum, maximum = tenant_settings.resolved_delay_bounds()
+    if minimum is None:
+        minimum = settings.CAMPAIGN_MIN_DELAY_SECONDS
+    if maximum is None:
+        maximum = settings.CAMPAIGN_MAX_DELAY_SECONDS
+    return max(float(minimum), 0.0), max(float(maximum), 0.0)
+
+
 def resolve_delay_bounds(campaign) -> tuple[float, float]:
     """
     The (min, max) delay window for one campaign, in seconds.
 
-    Campaign-level values win; either one being NULL falls back to the
-    deployment default, which is how every campaign created before this
-    feature existed keeps its original pacing.
+    Three levels, most specific first:
+
+        this campaign  >  this workspace's settings  >  the deployment default
+
+    Each is consulted only where the one before it said nothing, which is what
+    makes "leave it blank to use the account default" mean what it says. A
+    campaign created before either of the first two existed has both blank and
+    resolves to the deployment default, exactly as it always did.
     """
     minimum = campaign.min_delay_seconds
-    if minimum is None:
-        minimum = settings.CAMPAIGN_MIN_DELAY_SECONDS
     maximum = campaign.max_delay_seconds
-    if maximum is None:
-        maximum = settings.CAMPAIGN_MAX_DELAY_SECONDS
+
+    if minimum is None or maximum is None:
+        from apps.tenants.models import TenantSettings
+
+        workspace_min, workspace_max = resolve_tenant_delay_bounds(
+            TenantSettings.for_tenant(campaign.tenant_id)
+        )
+        if minimum is None:
+            minimum = workspace_min
+        if maximum is None:
+            maximum = workspace_max
 
     minimum = max(float(minimum), 0.0)
     maximum = max(float(maximum), 0.0)

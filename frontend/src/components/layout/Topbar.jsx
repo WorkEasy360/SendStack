@@ -2,6 +2,7 @@ import { useLocation } from "react-router-dom";
 import { Menu } from "lucide-react";
 import Badge from "../ui/Badge";
 import { LogoMark } from "./Logo";
+import ThemeToggle from "./ThemeToggle";
 import { NAV_GROUPS } from "../../config/navigation";
 
 const ALL_ITEMS = NAV_GROUPS.flatMap((group) => group.items);
@@ -19,7 +20,7 @@ export default function Topbar({ user, onOpenMobileNav }) {
     const { pathname } = useLocation();
 
     return (
-        <header className="h-16 shrink-0 z-30 bg-white border-b border-ink-200 flex items-center gap-3 px-4 sm:px-6">
+        <header className="h-16 shrink-0 z-30 bg-surface border-b border-ink-200 flex items-center gap-3 px-4 sm:px-6">
             <button
                 type="button"
                 onClick={onOpenMobileNav}
@@ -39,6 +40,8 @@ export default function Topbar({ user, onOpenMobileNav }) {
 
             <div className="flex-1" />
 
+            <ThemeToggle />
+
             {user && (
                 <div className="flex items-center gap-3">
                     <Badge tone="gray" className="hidden sm:inline-flex">
@@ -52,7 +55,7 @@ export default function Topbar({ user, onOpenMobileNav }) {
                             <p className="text-xs text-ink-500 m-0 truncate max-w-[180px]">{user.tenant_name}</p>
                         )}
                     </div>
-                    <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-white text-sm font-bold flex items-center justify-center uppercase">
+                    <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-ink-50 text-sm font-bold flex items-center justify-center uppercase">
                         {(user.username || "?").charAt(0)}
                     </span>
                 </div>

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { ChevronDown } from "lucide-react";
 
 const base =
-    "w-full rounded-lg border bg-white px-3 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 transition-colors " +
+    "w-full rounded-lg border bg-surface px-3 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 transition-colors " +
     "focus:outline-none focus:ring-4 disabled:bg-ink-100 disabled:text-ink-500 disabled:cursor-not-allowed";
 
 const normal = "border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:ring-brand-500/15";
@@ -97,7 +97,7 @@ export function FileInput({ className = "", ...props }) {
     return (
         <input
             type="file"
-            className={`w-full text-sm text-ink-600 file:mr-3 file:rounded-lg file:border-0 file:bg-ink-900 file:px-3.5 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-ink-800 file:cursor-pointer cursor-pointer ${className}`}
+            className={`w-full text-sm text-ink-600 file:mr-3 file:rounded-lg file:border-0 file:bg-ink-900 file:px-3.5 file:py-2 file:text-sm file:font-semibold file:text-ink-50 hover:file:bg-ink-800 file:cursor-pointer cursor-pointer ${className}`}
             {...props}
         />
     );
@@ -154,7 +154,7 @@ export function Toggle({ checked, onChange, label, description, disabled = false
                     className="peer sr-only"
                 />
                 <span className="block w-10 h-6 rounded-full bg-ink-300 transition-colors peer-checked:bg-brand-600 peer-focus-visible:ring-4 peer-focus-visible:ring-brand-500/20" />
-                <span className="absolute left-0.5 top-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+                <span className="absolute left-0.5 top-0.5 w-5 h-5 rounded-full bg-surface shadow-sm transition-transform peer-checked:translate-x-4" />
             </span>
         </label>
     );

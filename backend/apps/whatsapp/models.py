@@ -4,6 +4,22 @@ from django.db import models
 from .connections.session import decrypt_secret, encrypt_secret
 
 
+class ActiveAccountManager(models.Manager):
+    """
+    The devices a tenant still has.
+
+    Archived devices are hidden from every ordinary query -- the device list,
+    the pickers a campaign or a chatbot chooses a number from, the plan's
+    device count -- because as far as the user is concerned they deleted
+    them. They stay in the table only so the campaigns and messages that
+    reference them (both PROTECT) keep resolving in reports. Use
+    ``all_objects`` to see those rows.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(archived_at__isnull=True)
+
+
 class WhatsAppAccount(models.Model):
 
     class Status(models.TextChoices):
@@ -118,6 +134,25 @@ class WhatsAppAccount(models.Model):
     updated_at = models.DateTimeField(
         auto_now=True
     )
+
+    # Set when the user deletes a device that campaigns or messages still
+    # reference. Those relations are PROTECT on purpose -- send history
+    # outlives the number it went out from -- so the row cannot leave the
+    # table, but the device leaves the product: archived accounts are gone
+    # from every list, cannot be sent from, and stop counting against the
+    # plan's device limit. A device nothing references is deleted outright
+    # and never gets here. See apps.whatsapp.views.perform_destroy.
+    archived_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+
+    #: Default manager, and so what every reverse relation and picker sees:
+    #: live devices only.
+    objects = ActiveAccountManager()
+    #: Archived rows included -- for history, reporting and support.
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ["-created_at"]

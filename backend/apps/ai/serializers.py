@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
-from .models import AIAgentConfig, AIUsageLog, KnowledgeAnswer, KnowledgeBase, KnowledgeDocument
+from .models import AIAgentConfig, AIUsageLog, KnowledgeAnswer, KnowledgeBase, KnowledgeChunk, KnowledgeDocument
+from .providers.registry import base_url_problem, model_name_problem
 
 
 class AIAgentConfigSerializer(serializers.ModelSerializer):
@@ -9,19 +10,50 @@ class AIAgentConfigSerializer(serializers.ModelSerializer):
     api_key = serializers.CharField(write_only=True, required=False, allow_blank=True)
     has_api_key = serializers.SerializerMethodField()
     is_ready = serializers.SerializerMethodField()
+    # What the agent can currently do, resolved from the three switches. Read
+    # back rather than inferred in the browser, so the page and the send path
+    # cannot disagree about what is switched on.
+    available_tools = serializers.SerializerMethodField()
+    # Whether the deployment has taken the knowledge-only decision out of this
+    # tenant's hands. Read back so the settings page can show the switch as
+    # locked on instead of offering a control that silently does nothing.
+    knowledge_only_enforced = serializers.SerializerMethodField()
 
     class Meta:
         model = AIAgentConfig
         fields = (
-            "is_enabled", "display_name", "provider", "model", "business_context",
+            "is_enabled", "display_name", "provider", "model", "base_url", "business_context",
             "temperature", "max_output_tokens", "history_messages", "knowledge_chunks",
-            "answer_from_knowledge_only", "reply_when_assigned", "max_replies_per_conversation",
+            "answer_from_knowledge_only", "knowledge_only_message", "knowledge_only_enforced",
+            "reply_when_assigned", "max_replies_per_conversation",
             "handoff_enabled", "handoff_message",
             "knowledge_base", "reply_scope", "fallback_action", "min_relevance",
             "crm_logging_enabled", "crm_tagging_enabled",
+            "tools_enabled", "allow_write_tools", "allow_send_tools", "max_tool_rounds", "available_tools",
             "api_key", "has_api_key", "is_ready", "updated_at",
         )
-        read_only_fields = ("has_api_key", "is_ready", "updated_at")
+        read_only_fields = (
+            "has_api_key", "is_ready", "available_tools", "knowledge_only_enforced", "updated_at",
+        )
+
+    def get_knowledge_only_enforced(self, obj):
+        from django.conf import settings
+
+        return bool(getattr(settings, "AI_KNOWLEDGE_ONLY", False))
+
+    def get_available_tools(self, obj):
+        from . import tools
+
+        return tools.available(obj)
+
+    def validate_max_tool_rounds(self, value):
+        from .agent import MAX_TOOL_ROUNDS_CEILING
+
+        if value and value > MAX_TOOL_ROUNDS_CEILING:
+            raise serializers.ValidationError(
+                f"At most {MAX_TOOL_ROUNDS_CEILING}. Each round is a full request billed to your account."
+            )
+        return value
 
     def validate_knowledge_base(self, value):
         if value is not None and value.tenant_id != self.context["request"].user.tenant_id:
@@ -48,6 +80,18 @@ class AIAgentConfigSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         merged = {**{field: getattr(self.instance, field, None) for field in self.fields}, **attrs}
+
+        # A model name from the wrong vendor's vocabulary is only discovered
+        # when a customer is already waiting for the reply, so it is caught on
+        # the way in instead.
+        problem = model_name_problem(merged.get("provider"), merged.get("model"))
+        if problem:
+            raise serializers.ValidationError({"model": problem})
+
+        problem = base_url_problem(merged.get("provider"), merged.get("base_url"))
+        if problem:
+            raise serializers.ValidationError({"base_url": problem})
+
         if merged.get("handoff_enabled") and not (merged.get("handoff_message") or "").strip():
             raise serializers.ValidationError(
                 {"handoff_message": "Write what the customer should be told when the agent hands over."}
@@ -126,10 +170,23 @@ class KnowledgeUploadSerializer(serializers.Serializer):
         queryset=KnowledgeBase.objects.all(), required=False, allow_null=True,
     )
     title = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    # An updated version of a document already here, rather than a new one.
+    # Without this, re-uploading a corrected price list leaves the old one
+    # active alongside it and the agent answers from whichever the retrieval
+    # happens to prefer -- which is the stale-answer failure the whole
+    # delete-then-rechunk design exists to avoid.
+    replaces = serializers.PrimaryKeyRelatedField(
+        queryset=KnowledgeDocument.objects.all(), required=False, allow_null=True,
+    )
 
     def validate_knowledge_base(self, value):
         if value is not None and value.tenant_id != self.context["request"].user.tenant_id:
             raise serializers.ValidationError("Choose one of your own knowledge bases.")
+        return value
+
+    def validate_replaces(self, value):
+        if value is not None and value.tenant_id != self.context["request"].user.tenant_id:
+            raise serializers.ValidationError("Choose one of your own documents.")
         return value
 
     def validate_file(self, value):

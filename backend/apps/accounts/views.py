@@ -1,15 +1,19 @@
+import logging
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import Throttled
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -17,12 +21,16 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.audit.models import AuditEvent
 from apps.credits.services import CreditError, reclaim_credits_on_delete
+from apps.subscriptions.entitlements import EntitlementError
+from apps.subscriptions.services import quota_guard
 from apps.tenants.models import Tenant
+from core import lockout
 from core.bulk import BulkActionError, BulkActionMixin
 
 from .serializers import (
     CurrentUserSerializer,
-    MultiSenderTokenSerializer,
+    SendStackTokenSerializer,
+    PasswordChangeSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     ManagedUserCreateSerializer,
@@ -30,10 +38,37 @@ from .serializers import (
     ImpersonationStartSerializer,
 )
 from .models import ImpersonationSession
+from . import emails
+from .sessions import revoke_all_refresh_tokens
+
+logger = logging.getLogger("sendstack")
+
+
+#: Scope for every endpoint where the request *is* a guess at a credential.
+#: Named "auth" to match settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"],
+#: which has always defined a 10/min rate for it -- it simply had nothing
+#: using it, so login fell back to the far looser anonymous rate.
+AUTH_THROTTLE_SCOPE = "auth"
+
+#: Scope name for core.lockout's per-account counter on login.
+LOGIN_LOCKOUT_SCOPE = "login"
+
+#: Scope for the per-*email* counter on password-reset requests. Separate from
+#: the login scope on purpose: a mailbox being flooded and an account being
+#: guessed at are different problems with different thresholds, and spending
+#: one budget must not lock the other.
+PASSWORD_RESET_SCOPE = "password_reset"
 
 
 class LoginView(TokenObtainPairView):
-    serializer_class = MultiSenderTokenSerializer
+    serializer_class = SendStackTokenSerializer
+
+    # ScopedRateThrottle rather than the default anon/user pair: this endpoint
+    # is unauthenticated, so DEFAULT_THROTTLE_CLASSES only ever applied
+    # AnonRateThrottle's 60/min to it -- six times the rate the deployment
+    # thought it had configured for authentication.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = AUTH_THROTTLE_SCOPE
 
     def post(self, request, *args, **kwargs):
         # Deliberately not calling super().post(): TokenObtainPairView.post()
@@ -43,17 +78,103 @@ class LoginView(TokenObtainPairView):
         # audit event -- a duplicate query on every single login. Inlining
         # TokenViewBase.post()'s logic here (identical response/error
         # behavior) lets us reuse `serializer.user` instead.
+        #
+        # The rate throttle above counts requests per client address, which an
+        # attacker rotating addresses walks straight past. The lockout counts
+        # attempts against the *account*, which they cannot.
+        identifier = str(request.data.get("username") or "")
+
+        if lockout.is_locked(LOGIN_LOCKOUT_SCOPE, identifier):
+            # 429 with no wait hint, and the same response whether or not this
+            # username exists -- see the note on record_failure below.
+            raise Throttled(detail="Too many failed sign-in attempts. Try again later.")
+
         serializer = self.get_serializer(data=request.data)
         try:
             serializer.is_valid(raise_exception=True)
         except TokenError as exc:
+            # Counted too: a malformed-token error here is still a failed
+            # attempt against this identifier.
+            lockout.record_failure(LOGIN_LOCKOUT_SCOPE, identifier)
             raise InvalidToken(exc.args[0]) from exc
+        except Exception:
+            # Every other failure -- wrong password, unknown username, inactive
+            # account, a missing field -- counts, and counts identically.
+            # Counting only *real* accounts would turn the lockout into an
+            # existence oracle: locking on the eleventh attempt would mean
+            # "this account is real".
+            #
+            # Deliberately `Exception` and not the two or three types SimpleJWT
+            # happens to raise today. Over-counting is the safe direction for a
+            # brute-force control -- the worst case is an account briefly
+            # locked during an outage it could not have logged in through
+            # anyway -- whereas naming the types means a library change quietly
+            # stops the counter and nothing fails to tell us.
+            lockout.record_failure(LOGIN_LOCKOUT_SCOPE, identifier)
+            raise
 
         user = serializer.user
+
+        # Checked here rather than inside the serializer, and only *after* the
+        # credentials have been accepted. Inside `validate` it would surface as
+        # a validation error, which the `except Exception` above counts as a
+        # failed attempt -- so a suspended workspace would spend its users'
+        # lockout budget and eventually lock accounts that did nothing wrong.
+        #
+        # Told plainly, because somebody who signs in successfully and is then
+        # refused by every screen has a much worse time than somebody who is
+        # told what happened. 401: it is an authentication refusal, and the
+        # frontend already routes those to the sign-in screen.
+        tenant = getattr(user, "tenant", None)
+        if tenant is not None and not tenant.is_active:
+            lockout.clear(LOGIN_LOCKOUT_SCOPE, identifier)
+            return Response(
+                {"detail": "This workspace is suspended. Contact support."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        lockout.clear(LOGIN_LOCKOUT_SCOPE, identifier)
         if user.tenant_id:
             AuditEvent.objects.create(actor=user, tenant_id=user.tenant_id, action="auth.login")
 
         return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+class LogoutView(APIView):
+    """
+    End a session on the server, not just in the browser.
+
+    Clearing localStorage removes the tokens from one device and does nothing
+    to the tokens themselves: a refresh token copied off that machine stayed
+    valid for its full seven days, so "log out" on a shared or lost computer
+    protected nobody. This blacklists the refresh token that is presented, at
+    which point it -- and every access token later minted from it -- is dead.
+
+    Unauthenticated on purpose. The refresh token *is* the credential being
+    surrendered, and the access token that accompanies it has a 15-minute life,
+    so requiring a live one would mean the most important case (a session left
+    open long enough to matter) is the one that could not be ended.
+
+    Always answers 200. Logging out is not an operation a caller can usefully
+    retry, an already-dead token is the outcome they asked for, and a
+    distinguishable error would say whether a given token string was ever real.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = AUTH_THROTTLE_SCOPE
+
+    def post(self, request):
+        raw = request.data.get("refresh")
+        if raw:
+            try:
+                RefreshToken(raw).blacklist()
+            except TokenError:
+                # Expired, already blacklisted, or never valid. All three mean
+                # the same thing to the caller: it cannot be used again.
+                pass
+        return Response({"detail": "Signed out."}, status=status.HTTP_200_OK)
 
 
 class CurrentUserView(APIView):
@@ -63,37 +184,106 @@ class CurrentUserView(APIView):
         return Response({"data": CurrentUserSerializer(request.user).data})
 
 
+#: The one sentence this endpoint ever says. A constant because it must be
+#: byte-identical for an address that exists and one that does not -- two
+#: wordings that differ by so much as a full stop are an enumeration oracle.
+RESET_REQUESTED_DETAIL = (
+    "If an account exists for this email, a password reset link has been sent."
+)
+
+
 class PasswordResetRequestView(APIView):
     authentication_classes = []
     permission_classes = []
+    # Same scope as login. This endpoint sends real email to a real address on
+    # request, so an unthrottled one is both an enumeration probe and a way to
+    # have this deployment mail-bomb somebody.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = AUTH_THROTTLE_SCOPE
 
     def post(self, request):
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        # Two throttles on two different axes, because they stop two different
+        # attacks. The DRF scope above counts per client address and stops one
+        # machine hammering the endpoint. This counts per *mailbox*, and is the
+        # only one that stops somebody with a proxy pool filling one person's
+        # inbox -- every one of those requests comes from a different address
+        # and none of them trips a per-client rate.
+        #
+        # Counted before the user lookup, and the response is the same either
+        # way, so the throttle itself cannot be used to test whether an address
+        # is registered.
+        over_limit = _password_reset_over_limit(email)
+
         user = get_user_model().objects.filter(
-            email__iexact=serializer.validated_data["email"], is_active=True
+            email__iexact=email, is_active=True
         ).select_related("tenant").first()
 
-        # Always return the same response so this endpoint cannot enumerate users.
-        if user:
+        if user and not over_limit:
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = default_token_generator.make_token(user)
             reset_url = f"{settings.FRONTEND_URL}/reset-password?uid={uid}&token={token}"
-            send_mail(
-                subject="Reset your MultiSender password",
-                message=f"Use this link to set a new password: {reset_url}",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[user.email],
-                fail_silently=False,
+            # Never logged, never echoed, and not passed through any
+            # intermediate that records its arguments: the token in this URL is
+            # a live credential for the next hour.
+            emails.send_password_reset(
+                user, reset_url, expires_in_hours=_reset_expiry_hours(),
             )
             if user.tenant_id:
-                AuditEvent.objects.create(actor=user, tenant=user.tenant, action="auth.password_reset_requested")
-        return Response({"detail": "If an active account uses this email, a reset link has been sent."})
+                AuditEvent.objects.create(
+                    actor=user, tenant=user.tenant, action="auth.password_reset_requested",
+                )
+        elif over_limit:
+            logger.warning(
+                "Password-reset requests for one address are over the limit; not sending."
+            )
+
+        return Response({"detail": RESET_REQUESTED_DETAIL})
+
+
+def _reset_expiry_hours() -> int:
+    seconds = int(getattr(settings, "PASSWORD_RESET_TIMEOUT", 3600))
+    return max(seconds // 3600, 1)
+
+
+def _password_reset_over_limit(email: str) -> bool:
+    """
+    Whether this address has already been sent as many reset mails as it may be.
+
+    Uses core.lockout's hashed-key counter, so the addresses currently being
+    targeted are not sitting in Redis in the clear. Its own limits, not the
+    login ones: asking twice because the first mail was slow is normal, and
+    being locked out of password recovery for fifteen minutes after two
+    attempts would turn a safeguard into a support ticket.
+
+    Fails **open**, like everything built on that cache: if Redis is down,
+    somebody who has genuinely forgotten their password must still be able to
+    recover, and the per-address DRF throttle still applies.
+    """
+    limit = int(getattr(settings, "PASSWORD_RESET_MAX_PER_EMAIL", 5))
+    if limit <= 0:
+        return False
+
+    key = lockout.cache_key(PASSWORD_RESET_SCOPE, email)
+    window = int(getattr(settings, "PASSWORD_RESET_EMAIL_WINDOW_SECONDS", 3600))
+    if cache.add(key, 1, timeout=window):
+        return False
+    try:
+        return int(cache.incr(key)) > limit
+    except ValueError:
+        cache.add(key, 1, timeout=window)
+        return False
 
 
 class PasswordResetConfirmView(APIView):
     authentication_classes = []
     permission_classes = []
+    # A reset token is a secret being guessed at, exactly like a password.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = AUTH_THROTTLE_SCOPE
 
     def post(self, request):
         serializer = PasswordResetConfirmSerializer(data=request.data)
@@ -108,9 +298,73 @@ class PasswordResetConfirmView(APIView):
 
         user.set_password(serializer.validated_data["new_password"])
         user.save(update_fields=["password"])
+
+        # The token dies here, and it dies for free. Django's
+        # default_token_generator hashes the user's current password hash into
+        # the token, so changing the password makes every token minted before
+        # this line fail check_token -- single use, and no token table to keep.
+        # The same property is what makes an old link unusable after a *later*
+        # reset, which is the reuse case the audit asked about.
+
+        # Every session this account had is now dead. Without this, a refresh
+        # token stolen before the reset keeps minting 15-minute access tokens
+        # for its full seven-day life -- so "I reset my password because I
+        # think somebody has my account" would have accomplished nothing at
+        # all. Access tokens already issued still work until they expire;
+        # that 15-minute window is the honest remaining exposure, and closing
+        # it would mean a blacklist lookup on every API call.
+        revoke_all_refresh_tokens(user)
+
+        # Proving control of the mailbox is a stronger signal than the failed
+        # attempts that may have locked this account, so the counter goes.
+        # Without this, someone who forgot their password, guessed until they
+        # were locked out and then reset it would still be refused.
+        lockout.clear(LOGIN_LOCKOUT_SCOPE, user.get_username())
         if user.tenant_id:
             AuditEvent.objects.create(actor=user, tenant=user.tenant, action="auth.password_reset_completed")
+
+        # Sent last and never allowed to fail the request: the password is
+        # already changed, and refusing to say so because the mail server is
+        # down would leave somebody unable to sign in with either password.
+        emails.send_password_changed(user, reason="reset")
+
         return Response({"detail": "Password updated successfully."})
+
+
+class PasswordChangeView(APIView):
+    """
+    Change your own password, while signed in.
+
+    Requires the current password even though the caller is already
+    authenticated. That is not ceremony: an access token found on an unlocked
+    laptop is enough to reach this endpoint, and without the old password it
+    would be enough to take the account permanently. Knowing the current
+    password is the one thing the person holding a stolen token does not.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = AUTH_THROTTLE_SCOPE
+
+    def post(self, request):
+        serializer = PasswordChangeSerializer(data=request.data, context={"user": request.user})
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["new_password"])
+        user.save(update_fields=["password"])
+
+        # Same reasoning as the reset path: the point of changing a password is
+        # that the old credential stops working everywhere, not just here.
+        revoke_all_refresh_tokens(user)
+        lockout.clear(LOGIN_LOCKOUT_SCOPE, user.get_username())
+        if user.tenant_id:
+            AuditEvent.objects.create(actor=user, tenant=user.tenant, action="auth.password_changed")
+        emails.send_password_changed(user, reason="changed")
+
+        return Response({
+            "detail": "Password updated. You have been signed out on your other devices.",
+        })
 
 
 class UserActionError(Exception):
@@ -167,14 +421,27 @@ class ManagedUserViewSet(BulkActionMixin, viewsets.ModelViewSet):
         tenant = Tenant.objects.create(
             name=serializer.validated_data["tenant_name"], kind=tenant_kind, parent=parent
         )
-        new_user = get_user_model().objects.create_user(
-            username=serializer.validated_data["username"],
-            email=serializer.validated_data["email"],
-            password=serializer.validated_data["password"],
-            mobile=serializer.validated_data.get("mobile", ""),
-            role=requested_role,
-            tenant=tenant,
-        )
+        # `max_users` counts the active, undeleted users **of the tenant the
+        # new account will belong to** -- not the actor's tenant, not the
+        # tenants below it, and never a superadmin or a reseller from
+        # somewhere else in the hierarchy. See docs/ENTITLEMENTS.md.
+        #
+        # Today that tenant is always the one created on the line above, so
+        # the count is zero and the ceiling never bites: this endpoint gives
+        # every account its own workspace, which is the reason the audit found
+        # the team subsystem unreachable. The check is here rather than
+        # waiting for that to change, because the moment a second user can
+        # join an existing workspace this is the line that has to stop them,
+        # and adding it later means shipping the feature unenforced first.
+        with quota_guard(tenant.pk, "users"):
+            new_user = get_user_model().objects.create_user(
+                username=serializer.validated_data["username"],
+                email=serializer.validated_data["email"],
+                password=serializer.validated_data["password"],
+                mobile=serializer.validated_data.get("mobile", ""),
+                role=requested_role,
+                tenant=tenant,
+            )
         AuditEvent.objects.create(
             actor=actor, tenant=tenant, action="users.created", object_type="accounts.User", object_id=str(new_user.pk),
             metadata={"role": new_user.role},
@@ -246,8 +513,19 @@ class ManagedUserViewSet(BulkActionMixin, viewsets.ModelViewSet):
             raise BulkActionError("You cannot modify this user.")
         if target.is_active == is_active:
             return
-        target.is_active = is_active
-        target.save(update_fields=["is_active"])
+        if is_active:
+            # Reactivating puts somebody back into their workspace's headcount,
+            # so it is a create as far as the plan is concerned. Suspending
+            # never is -- an account can always be taken *out* of a full plan.
+            try:
+                with quota_guard(target.tenant_id, "users"):
+                    target.is_active = True
+                    target.save(update_fields=["is_active"])
+            except EntitlementError as exc:
+                raise BulkActionError(str(exc.detail)) from exc
+        else:
+            target.is_active = is_active
+            target.save(update_fields=["is_active"])
         AuditEvent.objects.create(
             actor=request.user, tenant=target.tenant, action="users.updated",
             object_type="accounts.User", object_id=str(target.pk), metadata={"is_active": is_active},

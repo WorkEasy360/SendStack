@@ -39,6 +39,8 @@ import QuickSetup from "./QuickSetup";
 import { validateGraph } from "../../utils/workflowGraph";
 import { Checkbox, CheckboxField, Field, Input, Select, Textarea, Toggle } from "../../components/ui/Field";
 import { useToast } from "../../components/ui/Toast";
+import { FeatureLocked } from "../../components/billing/FeatureLock";
+import { useEntitlements } from "../../context/EntitlementsContext";
 
 // Quick setup is deliberately first and default. Somebody arriving here wants
 // something to happen, not to learn a node graph; the three tabs after it are
@@ -238,7 +240,7 @@ function AutomationRow({ icon: Icon, title, subtitle, item, onToggle, onEdit, on
 
     return (
         <div
-            className={`bg-white border rounded-card shadow-card p-4 ${
+            className={`bg-surface border rounded-card shadow-card p-4 ${
                 selected ? "border-brand-400 ring-1 ring-brand-500/20" : "border-ink-200"
             }`}
         >
@@ -291,7 +293,13 @@ function AutomationRow({ icon: Icon, title, subtitle, item, onToggle, onEdit, on
 }
 
 /** Template-or-custom message body, shared by rules, follow-ups and campaigns. */
-function MessageContentFields({ form, setForm, templates }) {
+function MessageContentFields({ form, setForm, templates, accounts = [] }) {
+    // Which connection this rule sends on decides whether buttons arrive
+    // as buttons or as a numbered list, so the builder is told.
+    const provider = accounts.find(
+        (account) => String(account.id) === String(form.whatsapp_account),
+    )?.provider;
+
     const usingTemplate = Boolean(form.template);
     // A template brings its own buttons, so they are shown rather than edited
     // here -- editing them belongs on the template, where every message using
@@ -366,6 +374,7 @@ function MessageContentFields({ form, setForm, templates }) {
                     <ButtonBuilder
                         value={form.buttons}
                         onChange={(buttons) => setForm({ ...form, buttons })}
+                        provider={provider}
                         hint="Shown under the message. Add a rule triggered by a button id to answer a tap."
                     />
                 </>
@@ -402,6 +411,7 @@ function AccountField({ value, onChange, accounts }) {
 
 export default function Automation() {
     const [tab, setTab] = useState("quick");
+    const { hasFeature } = useEntitlements();
     const [accounts, setAccounts] = useState([]);
     const [templates, setTemplates] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -447,7 +457,18 @@ export default function Automation() {
             )}
             {tab === "rules" && <RulesTab {...shared} />}
             {tab === "followups" && <FollowUpsTab {...shared} />}
-            {tab === "workflows" && <WorkflowsTab {...shared} />}
+            {/* The workflow builder is the only part of this page behind a
+                plan switch. Welcome messages, keyword replies and follow-ups
+                are on every plan and keep working exactly as they did. */}
+            {tab === "workflows" &&
+                (hasFeature("workflows") ? (
+                    <WorkflowsTab {...shared} />
+                ) : (
+                    <FeatureLocked
+                        title="Workflows"
+                        description="Build multi-step sequences: send a message, wait, branch on what the contact does, tag them, or hand the chat to an agent."
+                    />
+                ))}
         </div>
     );
 }
@@ -744,7 +765,7 @@ function RuleModal({ initial, accounts, templates, onSubmit, onClose }) {
                     />
                 </Field>
 
-                <MessageContentFields form={form} setForm={setForm} templates={templates} />
+                <MessageContentFields form={form} setForm={setForm} templates={templates} accounts={accounts} />
 
                 <div className="mb-5">
                     <Toggle
@@ -1028,7 +1049,7 @@ function FollowUpModal({ initial, accounts, templates, onSubmit, onClose }) {
                     templates={templates}
                 />
 
-                <MessageContentFields form={form} setForm={setForm} templates={templates} />
+                <MessageContentFields form={form} setForm={setForm} templates={templates} accounts={accounts} />
 
                 <div className="mb-5">
                     <Toggle

@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import timedelta
 
 from django.core.cache import cache
@@ -16,7 +17,18 @@ from core.media import clean_media_items, resolve_media_items, spec_from_object
 
 from .models import AutomationRule, FollowUpRule, Workflow, WorkflowRun
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
+
+
+#: The plan switch the workflow builder and every run sits behind.
+WORKFLOWS_FEATURE = "workflows"
+
+
+def workflows_available(tenant_id) -> bool:
+    """Whether this tenant's plan includes the workflow builder."""
+    from apps.subscriptions.services import feature_enabled
+
+    return feature_enabled(tenant_id, WORKFLOWS_FEATURE)
 
 
 class WorkflowError(Exception):
@@ -188,6 +200,171 @@ def trigger_welcome_message(inbound_message: Message) -> bool:
         conversation=inbound_message.conversation, reference=f"automation:welcome:{rule.pk}", kind=Message.Kind.SERVICE,
     )
     return True
+
+
+#: A reply that is nothing but a number, optionally with the punctuation people
+#: copy off the list ("2." / "2)"). Deliberately anchored and deliberately not
+#: a search: "I'll take 2 of them" is a sentence, not a choice, and reading a
+#: number out of the middle of one would fire an automation nobody picked.
+_OPTION_NUMBER_RE = re.compile(r"^\(?(\d{1,3})\s*[.)\]]?$")
+
+
+def resolve_option_reply(inbound_message: Message) -> str:
+    """
+    Turn a typed answer into the button id it stands for.
+
+    This is what makes the numbered fallback a real button on a connection that
+    cannot send one. The contact saw "1. Yes please / 2. Not now" because their
+    WhatsApp number is QR-linked; they type "1"; this writes
+    ``replied_button_id = "callback_yes"`` onto the inbound message, and every
+    rung of the ladder below behaves exactly as it does for a native tap. No
+    second automation engine, and nothing downstream needs to know which kind
+    of connection the conversation is on.
+
+    Returns one of:
+
+    * ``""``           -- nothing to do; not an answer to an open question.
+    * ``"RESOLVED"``   -- matched, and the message now carries the button id.
+    * ``"UNMATCHED"``  -- clearly an attempt to choose, and it was not an
+                          option. The caller re-sends the list.
+
+    **The question is found from the conversation, never from the message.**
+    A contact controls only the text they send; which conversation it arrived
+    on, and therefore which tenant, contact and number it belongs to, is read
+    from the row the inbound path already wrote. There is no path from what
+    somebody types to whose question they can answer.
+    """
+    from apps.messaging.models import PendingButtonPrompt
+
+    text = (inbound_message.body or "").strip()
+    if not text or inbound_message.replied_button_id or not inbound_message.conversation_id:
+        return ""
+
+    prompt = (
+        PendingButtonPrompt.objects.filter(
+            conversation_id=inbound_message.conversation_id,
+            tenant_id=inbound_message.tenant_id,
+            answered_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if prompt is None:
+        return ""
+
+    button_id, how = _match_option(text, prompt.options)
+    if not button_id:
+        # Only a bare number is treated as a failed choice. Anything else is
+        # ordinary conversation -- somebody who replies "actually, can I speak
+        # to someone?" while a question is open must get the normal ladder, not
+        # the list read back at them.
+        return "UNMATCHED" if _OPTION_NUMBER_RE.match(text) else ""
+
+    PendingButtonPrompt.objects.filter(pk=prompt.pk, answered_at__isnull=True).update(
+        answered_at=timezone.now(), resolved_button_id=button_id,
+    )
+    Message.objects.filter(pk=inbound_message.pk).update(replied_button_id=button_id, interaction_type=how)
+    # Kept in step in memory as well, because every rung below reads the
+    # instance it was handed rather than re-reading the row.
+    inbound_message.replied_button_id = button_id
+    inbound_message.interaction_type = how
+
+    logger.info(
+        "Conversation %s | %r resolved to button %r via %s.",
+        inbound_message.conversation_id, text[:40], button_id, how,
+    )
+    return "RESOLVED"
+
+
+def _match_option(text: str, options) -> tuple:
+    """
+    ``(button_id, interaction_type)`` for a typed reply, or ``("", "")``.
+
+    Two ways to answer and no third. A number, because that is what the message
+    asked for; or an option's wording exactly, case- and space-insensitively,
+    because people type "Yes please" as readily as "1". There is deliberately
+    no fuzzy or partial matching: the cost of a near-miss here is firing the
+    wrong automation on somebody's customer, and "Not now" is one edit away
+    from "Not now?" being read as agreement.
+    """
+    from apps.messaging.models import Message as MessageModel
+    from core.buttons import REPLY
+
+    replies = [button for button in (options or []) if (button.get("type") or REPLY) == REPLY and button.get("id")]
+    if not replies:
+        return "", ""
+
+    numeric = _OPTION_NUMBER_RE.match(text)
+    if numeric:
+        position = int(numeric.group(1))
+        if 1 <= position <= len(replies):
+            return replies[position - 1]["id"], MessageModel.Interaction.NUMBERED_FALLBACK
+        return "", ""
+
+    # Collapse internal whitespace too, so "Yes  please" matches "Yes please".
+    wanted = " ".join(text.lower().split())
+    matches = [
+        button for button in replies
+        if " ".join(str(button.get("title", "")).lower().split()) == wanted
+    ]
+    # Exactly one, or it is not unambiguous. Two options that read the same
+    # cannot be told apart by their wording, and guessing between them is the
+    # one thing this function must never do.
+    if len(matches) == 1:
+        return matches[0]["id"], MessageModel.Interaction.TEXT_OPTION
+    return "", ""
+
+
+def reprompt_options(inbound_message: Message) -> bool:
+    """
+    Send the list again after an unusable choice.
+
+    The customer typed a number, which means they were trying to answer, so
+    silence would read as the bot ignoring them. Capped, because a contact
+    typing numbers at a bot they have misunderstood must not be answered
+    forever -- after the cap the question is closed and the message falls
+    through to the normal ladder, which can at least hand them to a person.
+    """
+    from apps.messaging.models import PendingButtonPrompt
+    from core.buttons import REPLY_INSTRUCTION, numbered_options
+
+    prompt = (
+        PendingButtonPrompt.objects.filter(
+            conversation_id=inbound_message.conversation_id,
+            tenant_id=inbound_message.tenant_id,
+            answered_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if prompt is None:
+        return False
+
+    if prompt.reprompt_count >= MAX_REPROMPTS:
+        PendingButtonPrompt.objects.filter(pk=prompt.pk).update(answered_at=timezone.now())
+        logger.info(
+            "Conversation %s | gave up re-sending the options after %s attempts.",
+            inbound_message.conversation_id, prompt.reprompt_count,
+        )
+        return False
+
+    options = "\n".join(numbered_options(prompt.options))
+    body = f"Please choose one of the available options:\n\n{options}\n\n{REPLY_INSTRUCTION}"
+    send_automated_message(
+        inbound_message.whatsapp_account, inbound_message.contact,
+        {"message_type": Message.MessageType.TEXT, "body": body},
+        conversation=inbound_message.conversation,
+        reference=f"automation:reprompt:{prompt.pk}:{prompt.reprompt_count}",
+        kind=Message.Kind.SERVICE,
+    )
+    PendingButtonPrompt.objects.filter(pk=prompt.pk).update(reprompt_count=prompt.reprompt_count + 1)
+    return True
+
+
+#: How many times an unusable answer gets the list read back to it.
+MAX_REPROMPTS = 2
 
 
 def trigger_button_rules(inbound_message: Message) -> bool:
@@ -649,6 +826,14 @@ def start_workflow(workflow: Workflow, contact, *, conversation=None, force: boo
     """
     if not workflow.is_active:
         raise WorkflowError("This workflow is not active.")
+    # Checked at the start of every run, not only when the workflow was built.
+    # A sequence created on a plan that included workflows would otherwise go
+    # on running for ever after a downgrade -- which is precisely the shape of
+    # bypass the entitlement layer exists to close.
+    if not workflows_available(workflow.tenant_id):
+        from apps.subscriptions.services import feature_message
+
+        raise WorkflowError(feature_message(workflow.tenant_id, WORKFLOWS_FEATURE))
     validate_nodes(workflow.nodes)
 
     if not force:
@@ -677,6 +862,18 @@ def resume_workflow(run: WorkflowRun) -> None:
         status=WorkflowRun.Status.RUNNING, updated_at=timezone.now(),
     )
     if not claimed:
+        return
+    # A run parked at a WAIT node can wake days after it started, which is
+    # ample time for a plan to change underneath it. Stopped rather than
+    # advanced, and stopped *visibly*: a sequence that simply went quiet is
+    # indistinguishable from one that broke.
+    if not workflows_available(run.workflow.tenant_id):
+        from apps.subscriptions.services import feature_message
+
+        _finish(
+            run, WorkflowRun.Status.FAILED,
+            error=feature_message(run.workflow.tenant_id, WORKFLOWS_FEATURE),
+        )
         return
     run.status = WorkflowRun.Status.RUNNING
     # A run started before the contact ever wrote in has no conversation yet;
@@ -910,6 +1107,11 @@ def start_workflows_for(inbound_message: Message, event: str) -> bool:
     """
     contact = inbound_message.contact
     if contact is None:
+        return False
+
+    # Asked once here rather than once per candidate workflow, and again
+    # inside start_workflow for the paths that do not come through this one.
+    if not workflows_available(inbound_message.tenant_id):
         return False
 
     account = inbound_message.whatsapp_account

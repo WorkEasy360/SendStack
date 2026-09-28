@@ -45,8 +45,65 @@ def _extract_button_reply(message_obj: dict) -> tuple[str, str] | None:
     return None
 
 
+def _describe_location(message_obj: dict) -> str:
+    """A location as one readable line, keeping whatever detail arrived."""
+    location = message_obj.get("location") or {}
+    name = (location.get("name") or "").strip()
+    address = (location.get("address") or "").strip()
+    latitude, longitude = location.get("latitude"), location.get("longitude")
+
+    parts = [part for part in (name, address) if part]
+    if latitude is not None and longitude is not None:
+        parts.append(f"{latitude}, {longitude}")
+    return f"[location: {' — '.join(parts)}]" if parts else "[location shared]"
+
+
+def _describe_contacts(message_obj: dict) -> str:
+    """Shared contact cards, named where the payload names them."""
+    cards = message_obj.get("contacts") or []
+    names = []
+    for card in cards[:3]:
+        if not isinstance(card, dict):
+            continue
+        name = (card.get("name") or {}).get("formatted_name") or ""
+        if name:
+            names.append(str(name).strip())
+    if names:
+        return f"[contact shared: {', '.join(names)}]"
+    return f"[{len(cards) or 1} contact card shared]"
+
+
+#: Inbound types with no attachment of ours to store, rendered as a short
+#: bracketed line instead. They are listed rather than lumped into the
+#: unknown-type branch so the thread reads as what happened ("voice message")
+#: rather than as an internal complaint ("unsupported message type: audio"),
+#: and so a chatbot can answer them sensibly -- see
+#: ``apps.chatbot.engine._is_readable``.
+_DESCRIBED_TYPES = {
+    "audio": "[voice message]",
+    "voice": "[voice message]",
+    "sticker": "[sticker]",
+    "video_note": "[video note]",
+    "order": "[order placed]",
+    "system": "[system message]",
+    "unknown": "[unsupported message]",
+}
+
+
 def _extract_body_and_type(message_obj: dict) -> tuple[str, str]:
-    msg_type = message_obj.get("type", "text")
+    """
+    One inbound message reduced to (body, our message type).
+
+    Every WhatsApp message type reaches this, including the ones the platform
+    cannot store as an attachment. Those become a short bracketed description
+    rather than an empty body, for two reasons: an empty row in the inbox is
+    indistinguishable from a bug, and an automated reply looking at an empty
+    string has nothing to decide from. The type stays TEXT for them because
+    ``Message.MessageType`` describes what this platform can *send*, and
+    widening it would let an API caller ask for an outbound sticker the
+    provider layer has no way to deliver.
+    """
+    msg_type = (message_obj.get("type") or "text").lower()
 
     if msg_type == "text":
         return message_obj.get("text", {}).get("body", ""), Message.MessageType.TEXT
@@ -62,6 +119,16 @@ def _extract_body_and_type(message_obj: dict) -> tuple[str, str]:
         # their own words in the thread -- and keyword rules match it just as
         # they would have matched the same words typed out.
         return button_reply[1], Message.MessageType.TEXT
+
+    if msg_type == "location":
+        return _describe_location(message_obj), Message.MessageType.TEXT
+    if msg_type == "contacts":
+        return _describe_contacts(message_obj), Message.MessageType.TEXT
+    if msg_type == "reaction":
+        emoji = (message_obj.get("reaction") or {}).get("emoji") or ""
+        return f"[reacted {emoji}]".replace(" ]", "]"), Message.MessageType.TEXT
+    if msg_type in _DESCRIBED_TYPES:
+        return _DESCRIBED_TYPES[msg_type], Message.MessageType.TEXT
 
     return f"[unsupported message type: {msg_type}]", Message.MessageType.TEXT
 
@@ -100,6 +167,11 @@ def record_inbound_message(event) -> Message | None:
         to_phone=contact.phone, direction=Message.Direction.INBOUND, message_type=message_type, body=body,
         status=Message.Status.DELIVERED, provider_message_id=message_obj.get("id") or None,
         replied_button_id=button_reply[0] if button_reply else "",
+        # A real tap, as opposed to the number somebody typed off a fallback
+        # list -- `automation.services.resolve_option_reply` stamps that one.
+        # Kept apart so "the buttons are not reaching anybody's phone" stays
+        # distinguishable from "they are reaching people who cannot tap them".
+        interaction_type=Message.Interaction.NATIVE_BUTTON if button_reply else "",
         delivered_at=timezone.now(),
     )
 

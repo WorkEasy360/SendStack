@@ -5,7 +5,7 @@ from rest_framework.views import exception_handler as drf_exception_handler
 
 from .request_context import get_request_id
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def api_exception_handler(exc, context):
@@ -25,6 +25,15 @@ def api_exception_handler(exc, context):
         )
 
     if isinstance(response.data, dict):
+        # An entitlement refusal carries more than a sentence: which feature
+        # or which quota, and a stable `code`. DRF only ever renders `detail`,
+        # so without this the frontend would be left parsing English to decide
+        # whether to offer an upgrade. See apps/subscriptions/entitlements.py.
+        extra = getattr(exc, "extra", None)
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                response.data.setdefault(key, value)
+
         response.data.setdefault("request_id", request_id)
 
     return response

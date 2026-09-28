@@ -1,9 +1,11 @@
+from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
 
 class Tenant(models.Model):
-    """An isolated business scope in the MultiSender hierarchy."""
+    """An isolated business scope in the SendStack hierarchy."""
 
     class Kind(models.TextChoices):
         PLATFORM = "PLATFORM", "Platform"
@@ -75,7 +77,7 @@ class TenantBranding(models.Model):
 
     # What every chain ends at, when nobody above has set anything.
     DEFAULTS = {
-        "product_name": "MultiSender",
+        "product_name": "SendStack",
         "logo_url": "",
         "primary_color": "#059669",
         "support_email": "",
@@ -282,3 +284,235 @@ class BusinessProfile(models.Model):
         return "; ".join(
             f"{row.get_weekday_display()} {row.opens_at:%H:%M}-{row.closes_at:%H:%M}" for row in rows
         )
+
+
+class AccountDeletionRequest(models.Model):
+    """
+    A customer asking for their workspace to be deleted.
+
+    Deliberately a **request** rather than a button that deletes. Three reasons,
+    and the third is the one that decides it:
+
+    * A workspace is a business. Deleting one is not undoable, and there is no
+      version of "are you sure?" that makes an instant, irreversible destroy
+      button safe at 11pm on a Friday.
+    * A compromised account must not be able to destroy the business it broke
+      into. A request that a real person notices, with a cooling-off window, is
+      the difference between a break-in and a catastrophe.
+    * The deletion itself already exists, with guards, in
+      ``manage.py delete_tenant`` -- which refuses a workspace with children,
+      refuses the platform tenant, requires the slug typed out, and reports
+      what it kept. Reimplementing that behind an HTTP endpoint would be
+      reimplementing it *without* those guards.
+
+    So this records the ask, starts a clock, and lets the customer change their
+    mind. An operator carries it out.
+
+    **It does not itself delete anything**, and the cooling-off window is not a
+    dark pattern: the customer can cancel it, is told the date, and the whole
+    thing is visible on their own settings page.
+    """
+
+    class Status(models.TextChoices):
+        REQUESTED = "REQUESTED", "Requested"
+        CANCELLED = "CANCELLED", "Cancelled by the customer"
+        COMPLETED = "COMPLETED", "Carried out"
+        REJECTED = "REJECTED", "Declined"
+
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="deletion_requests")
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+",
+    )
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.REQUESTED)
+
+    reason = models.TextField(blank=True, help_text="Why, in the customer's own words. Optional.")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    # When an operator may act. The customer can cancel freely until then, and
+    # the date is shown to them rather than being a quiet delay.
+    eligible_at = models.DateTimeField()
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.CharField(max_length=500, blank=True)
+
+    #: How long the customer has to change their mind.
+    COOLING_OFF_DAYS = 7
+
+    class Meta:
+        ordering = ["-requested_at"]
+        indexes = [models.Index(fields=["status", "eligible_at"], name="deletion_status_due_idx")]
+        constraints = [
+            # One open request per workspace. A second would make "has this
+            # workspace asked to be deleted?" have two answers.
+            models.UniqueConstraint(
+                fields=["tenant"],
+                condition=models.Q(status="REQUESTED"),
+                name="unique_open_deletion_request_per_tenant",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Deletion request for tenant {self.tenant_id} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        if not self.eligible_at:
+            from datetime import timedelta
+
+            from django.utils import timezone
+
+            self.eligible_at = timezone.now() + timedelta(days=self.COOLING_OFF_DAYS)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == self.Status.REQUESTED
+
+
+class TenantSettings(models.Model):
+    """
+    One workspace's own sending and housekeeping preferences.
+
+    Everything here already had a deployment-wide answer in ``settings.py`` and
+    was consequently the same for every customer on the box. That is the wrong
+    granularity for pacing: a customer running six warmed-up numbers into an
+    opted-in list and a customer running one week-old number into a cold one
+    need different delays, and neither of them can edit the deployment's
+    environment.
+
+    Follows ``compliance.CompliancePolicy`` exactly, including the two
+    decisions that matter:
+
+      * ``for_tenant`` returns an **unsaved** instance when a workspace has
+        never opened the settings page, so the send path can consult it
+        without a write on the hot path and without rows appearing behind
+        somebody's back;
+      * every value has a working default, and the defaults are the behaviour
+        that was already in force -- so a workspace that never touches this
+        screen sends exactly as it did before this model existed.
+
+    Delay is the one exception to "the default is a value": NULL there means
+    "use the deployment default", which is what keeps
+    ``settings.CAMPAIGN_MIN/MAX_DELAY_SECONDS`` meaningful as the fallback and
+    what every campaign resolved to before.
+    """
+
+    class DelayMode(models.TextChoices):
+        RANDOM = "RANDOM", "Random within a window"
+        FIXED = "FIXED", "The same every time"
+
+    tenant = models.OneToOneField(Tenant, on_delete=models.CASCADE, related_name="settings")
+
+    # -- Delay --------------------------------------------------------------
+    #
+    # FIXED collapses the window to its minimum rather than adding a second
+    # pair of columns: one number that is both bounds *is* a fixed delay, and
+    # a mode that reads from different fields than the window it replaces is
+    # how a setting ends up meaning one thing on screen and another in the
+    # worker.
+    delay_mode = models.CharField(max_length=10, choices=DelayMode.choices, default=DelayMode.RANDOM)
+    min_delay_seconds = models.FloatField(
+        null=True, blank=True, validators=[MinValueValidator(0)],
+        help_text="Shortest gap between two messages. Blank uses the platform default.",
+    )
+    max_delay_seconds = models.FloatField(
+        null=True, blank=True, validators=[MinValueValidator(0)],
+        help_text="Longest gap between two messages. Ignored when the delay is fixed.",
+    )
+
+    # -- Batching -----------------------------------------------------------
+    #
+    # 0 disables, the same convention the plan limits and the retention
+    # horizons use throughout this codebase: it is the reading that fails safe
+    # if somebody clears the field.
+    batch_size = models.PositiveIntegerField(
+        default=0,
+        help_text="Pause after this many messages. 0 sends continuously.",
+    )
+    batch_pause_seconds = models.PositiveIntegerField(
+        default=60,
+        help_text="How long to pause between batches.",
+    )
+
+    # -- Sleep --------------------------------------------------------------
+    #
+    # Distinct from batching, and deliberately so: a batch pause is a fixed,
+    # predictable gap, while sleep is a long random one. Running both is the
+    # point -- a short regular pause keeps throughput sane, and an occasional
+    # long irregular one is what stops a number's send pattern looking like a
+    # machine's.
+    sleep_enabled = models.BooleanField(default=False)
+    sleep_after_messages = models.PositiveIntegerField(
+        default=500, help_text="Take a long break after this many messages.",
+    )
+    sleep_min_seconds = models.PositiveIntegerField(default=300)
+    sleep_max_seconds = models.PositiveIntegerField(default=900)
+
+    # -- Retry --------------------------------------------------------------
+    #
+    # These bound `apps.messaging.tasks.send_message_task`, which has always
+    # retried a failed send three times. They cannot loosen the two rules that
+    # protect delivery: an *ambiguous* failure is never retried (it risks a
+    # duplicate), and the ceiling below is capped at MAX_SEND_RETRIES so a
+    # workspace cannot ask a worker to retry a broken number indefinitely.
+    retry_enabled = models.BooleanField(
+        default=True,
+        help_text="Try a failed message again before giving up on it.",
+    )
+    max_retries = models.PositiveSmallIntegerField(default=3)
+    # 30 rather than a rounder number: it is the base `retry_delay` has always
+    # been called with, and the promise this model makes is that a workspace
+    # which never opens the settings screen behaves exactly as it did before
+    # the screen existed.
+    retry_delay_seconds = models.PositiveIntegerField(
+        default=30, help_text="Base wait before the first retry; later ones back off from it.",
+    )
+
+    # -- Housekeeping -------------------------------------------------------
+    #
+    # 0 means "keep for ever", matching apps.health.retention. What this
+    # horizon covers is deliberately narrow and is enforced in
+    # `apps.tenants.storage`, not here: finished campaigns and the message
+    # rows under them. It can never reach a contact, a credit, a payment, a
+    # subscription, an audit event, a consent event or a running campaign.
+    campaign_data_retention_days = models.PositiveIntegerField(
+        default=0,
+        help_text="Delete finished campaigns older than this many days. 0 keeps everything.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "tenant settings"
+
+    def __str__(self):
+        return f"Settings for tenant {self.tenant_id}"
+
+    @classmethod
+    def for_tenant(cls, tenant):
+        """The workspace's settings, or an unsaved default set."""
+        tenant_id = getattr(tenant, "pk", tenant)
+        found = cls.objects.filter(tenant_id=tenant_id).first()
+        return found or cls(tenant_id=tenant_id)
+
+    def resolved_delay_bounds(self) -> tuple:
+        """
+        ``(min, max)`` in seconds, or ``(None, None)`` when this workspace has
+        expressed no preference and the deployment default should apply.
+
+        Returning None rather than substituting the default here is what keeps
+        the precedence readable in one place: campaign value, then workspace
+        value, then deployment value -- see
+        ``apps.campaigns.assignment.resolve_delay_bounds``.
+        """
+        if self.min_delay_seconds is None and self.max_delay_seconds is None:
+            return None, None
+
+        minimum = self.min_delay_seconds
+        if minimum is None:
+            minimum = self.max_delay_seconds
+        if self.delay_mode == self.DelayMode.FIXED:
+            return float(minimum), float(minimum)
+
+        maximum = self.max_delay_seconds
+        if maximum is None:
+            maximum = minimum
+        return float(minimum), float(max(maximum, minimum))

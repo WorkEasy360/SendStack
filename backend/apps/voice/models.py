@@ -3,6 +3,7 @@ import secrets
 from django.conf import settings
 from django.db import models
 
+from apps.ai.models import AIAgentConfig
 from apps.whatsapp.connections.session import decrypt_secret, encrypt_secret
 
 
@@ -75,7 +76,16 @@ class VoiceAgentConfig(models.Model):
     )
 
     # --- Model -------------------------------------------------------------
+    # Which vendor answers, separate from `provider` above -- that one is the
+    # carrier that carries the call, this one is the model that does the
+    # talking, and a tenant can change either without touching the other.
+    model_provider = models.CharField(
+        max_length=20, choices=AIAgentConfig.Provider.choices, default=AIAgentConfig.Provider.ANTHROPIC,
+    )
     model = models.CharField(max_length=100, default="claude-opus-5")
+    # Only read when model_provider is Custom -- the OpenAI-compatible
+    # endpoint's base URL, e.g. https://api.groq.com/openai/v1.
+    base_url = models.URLField(max_length=300, blank=True, default="")
     # Effort is the latency dial for a live call. A carrier drops the call if a
     # webhook takes too long, so the agent trades depth for staying on the
     # line; the tenant can raise it where their calls are worth the wait.

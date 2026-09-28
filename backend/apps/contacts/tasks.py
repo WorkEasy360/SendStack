@@ -1,5 +1,3 @@
-import csv
-import io
 import logging
 
 from django.utils import timezone
@@ -7,10 +5,14 @@ from django.utils import timezone
 from config.celery import app
 
 from .mapping import custom_fields_for, detect_columns, row_value
-from .models import Contact, ContactGroup, ContactImport, ContactTag
+from .models import ContactGroup, ContactImport, ContactTag
+# The CSV decoder lives in readers.py now, beside the Excel reader; it is
+# re-exported here because the streaming tests import it from this module.
+from .readers import _READ_CHUNK_BYTES, _decoded_lines, open_rows  # noqa: F401
+from .upsert import ContactQuotaReached, upsert_contact
 from .utils import normalize_phone
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 _MAX_STORED_ERRORS = 200
 
@@ -31,14 +33,16 @@ def process_contact_import(self, import_id: int):
 
     errors = []
     total_rows = created_count = updated_count = skipped_count = error_count = 0
+    quota_stopped = False
 
     try:
-        raw = contact_import.file.read().decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(raw))
+        # CSV or Excel; readers.open_rows settles which and hands back text
+        # rows either way.
+        headers, reader = open_rows(contact_import.file, contact_import.file.name)
         # Headers are matched to fields rather than required to be exact, so a
         # file exported from a phone ("Mobile No.", "Firm") imports without a
         # column-mapping screen. See apps/contacts/mapping.py.
-        mapping = detect_columns(reader.fieldnames)
+        mapping = detect_columns(headers)
         if "phone" not in mapping:
             raise ValueError(
                 "No phone column found. Name one of the columns 'phone', 'mobile' or 'whatsapp'."
@@ -59,48 +63,59 @@ def process_contact_import(self, import_id: int):
                 continue
 
             custom_fields = custom_fields_for(row, mapping)
+            defaults = {
+                "name": row_value(row, mapping, "name"),
+                "email": row_value(row, mapping, "email"),
+                "company": row_value(row, mapping, "company"),
+                "country": row_value(row, mapping, "country"),
+                "custom_fields": custom_fields,
+                "created_by_id": contact_import.created_by_id,
+            }
 
-            contact, was_created = Contact.objects.get_or_create(
-                tenant=contact_import.tenant,
-                phone=phone,
-                defaults={
-                    "name": row_value(row, mapping, "name"),
-                    "email": row_value(row, mapping, "email"),
-                    "company": row_value(row, mapping, "company"),
-                    "country": row_value(row, mapping, "country"),
-                    "custom_fields": custom_fields,
-                    "created_by_id": contact_import.created_by_id,
-                },
-            )
+            # The plan's ceiling, the gap-filling update rule and the consent
+            # assertion all live in `upsert_contact`, shared with the pasted
+            # importer -- see apps/contacts/upsert.py for why those three in
+            # particular must not have two implementations.
+            try:
+                _, outcome = upsert_contact(
+                    tenant=contact_import.tenant,
+                    phone=phone,
+                    defaults=defaults,
+                    custom_fields=custom_fields,
+                    groups=groups,
+                    tags=tags,
+                    consent_source=contact_import.consent_source,
+                    consent_reference=contact_import.consent_reference,
+                    actor=contact_import.created_by,
+                    consent_detail=f"Declared on import #{contact_import.pk}.",
+                )
+            except ContactQuotaReached as exc:
+                # Everything imported so far stays imported. Stopping is
+                # the whole point -- silently dropping the rest, or
+                # rolling back the part that worked, would both leave
+                # somebody guessing which of their contacts arrived.
+                quota_stopped = True
+                errors.append({"row": row_number, "error": str(exc.detail)})
+                error_count += 1
+                break
 
-            if was_created:
+            if outcome == "created":
                 created_count += 1
+            elif outcome == "updated":
+                updated_count += 1
             else:
-                # Fill in gaps on the existing contact rather than overwriting data
-                # someone may have edited by hand since the last import.
-                changed_fields = []
-                for field in ("name", "email", "company", "country"):
-                    value = row_value(row, mapping, field)
-                    if value and not getattr(contact, field):
-                        setattr(contact, field, value)
-                        changed_fields.append(field)
-                new_custom_fields = {k: v for k, v in custom_fields.items() if k not in contact.custom_fields}
-                if new_custom_fields:
-                    contact.custom_fields = {**contact.custom_fields, **new_custom_fields}
-                    changed_fields.append("custom_fields")
-
-                if changed_fields:
-                    contact.save(update_fields=changed_fields)
-                    updated_count += 1
-                else:
-                    skipped_count += 1
-
-            if groups:
-                contact.groups.add(*groups)
-            if tags:
-                contact.tags.add(*tags)
+                skipped_count += 1
 
         contact_import.status = ContactImport.Status.COMPLETED
+        if quota_stopped:
+            # Counted, not created. The rows past the one that ran out of room
+            # were never examined, so they are reported as skipped rather than
+            # as errors -- there is nothing wrong with them, and the person
+            # reading this report needs to know how many contacts are still
+            # waiting on an upgrade.
+            remaining = sum(1 for _ in reader)
+            total_rows += remaining
+            skipped_count += remaining
     except Exception as exc:  # noqa: BLE001 - always finish the import record, even on unexpected failures
         logger.exception("Contact import %s failed", import_id)
         contact_import.status = ContactImport.Status.FAILED

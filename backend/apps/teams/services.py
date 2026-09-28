@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from .models import AssignmentPolicy, CannedReply, TeamMember, WorkingHours
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # @username, stopping at anything a username cannot contain. Django usernames
 # allow letters, digits and @/./+/-/_ ; the dot and dash are excluded from the

@@ -11,7 +11,25 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
     />
-    <title>MultiSender</title>
+    <!--
+      The closed default for crawlers.
+
+      This one file is served for every route, including the thirty behind the
+      login, so the tag that ships with it is the tag an unauthenticated fetch
+      of /campaigns/42 sees. Public pages opt in by calling the useSeo hook
+      with index:true, and it puts this back when they unmount. See
+      src/hooks/useSeo.js for why the default lives here rather than in a
+      route-level effect.
+    -->
+    <meta name="robots" content="noindex, nofollow" />
+    <meta
+      name="description"
+      content="Send WhatsApp campaigns to contacts who opted in, answer replies in a shared inbox, and see what happened."
+    />
+    <meta property="og:site_name" content="SendStack" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>SendStack</title>
   </head>
   <body>
     <div id="root"></div>

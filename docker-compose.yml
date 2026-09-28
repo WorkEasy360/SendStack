@@ -1,8 +1,34 @@
+# Resource limits
+# ---------------
+# Every service below declares a memory reservation and a limit. The point is
+# not to squeeze the box -- it is that an unbounded container takes the *whole
+# host* down with it, and on this stack that means Postgres dies because a
+# Celery worker was importing a large CSV. With a limit, the worker is killed,
+# restarts, and everything else keeps serving.
+#
+# The numbers are sized against a measurement rather than guessed: a booted
+# Django process on this codebase is ~80 MB resident, and backend/gunicorn.conf.py
+# derives its worker count from MEM_LIMIT_BACKEND so the two cannot drift
+# apart. Raise MEM_LIMIT_* in .env rather than editing this file -- the worker
+# counts follow automatically.
+#
+# Note the asymmetry: postgres gets the largest share because it is the only
+# component whose loss is not recoverable by restarting it, and the workers get
+# the tightest because they are the ones that grow without bound.
 services:
   postgres:
     image: postgres:16-alpine
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_POSTGRES:-1g}
+    # Loopback only. The application, Celery and the migrations all reach
+    # Postgres as `postgres:5432` over the internal Docker network, which
+    # needs no published port at all -- this exists so a developer can run
+    # `manage.py test` or psql from the host. Never "5432:5432": that binds
+    # 0.0.0.0 and puts the database on the internet.
     ports:
-    - "5432:5432"
+      - "127.0.0.1:5432:5432"
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${DB_NAME:-multisender}
@@ -18,13 +44,24 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_REDIS:-256m}
+    # Deliberately not published at all. Redis holds the cache, the rate-limit
+    # counters, the failed-login counters and every queued Celery task; nothing
+    # outside this network has any business reaching it. Everything that needs
+    # it is a sibling container and uses `redis:6379`.
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+    # $$ so the password is expanded by the container's own shell rather than
+    # baked into the compose file's rendered command.
+    command: sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD"'
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,20 +72,32 @@ services:
   # this container will simply fail its own healthcheck and restart-loop in
   # isolation -- it does not block `backend` or anything else from starting.
   qr-bridge:
+    # Holds live WhatsApp device sessions in memory, one per connected number.
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_QR_BRIDGE:-512m}
     build:
       context: ./qr-bridge
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Published so a Django server run outside Docker (e.g. `manage.py
-    # runserver` for local frontend dev against Vite) can still reach it at
-    # QR_PROVIDER_BASE_URL=http://localhost:4001 -- containers on the
-    # internal Docker network keep using qr-bridge:4001 regardless.
+    # Loopback only. The bridge holds live WhatsApp device sessions and is
+    # authenticated by a single shared bearer token, so it must never be
+    # reachable from outside the host. Containers on the internal Docker
+    # network reach it as qr-bridge:4001 and ignore this; the binding exists
+    # only so a Django server run outside Docker (`manage.py runserver` for
+    # local frontend dev against Vite) can use
+    # QR_PROVIDER_BASE_URL=http://127.0.0.1:4001.
     ports:
-      - "4001:4001"
+      - "127.0.0.1:4001:4001"
     environment:
       QR_PROVIDER_API_KEY: ${QR_PROVIDER_API_KEY:-}
       QR_PROVIDER_WEBHOOK_SECRET: ${QR_PROVIDER_WEBHOOK_SECRET:-}
-      WHATSAPP_QR_SESSION_TTL_SECONDS: ${WHATSAPP_QR_SESSION_TTL_SECONDS:-99999999999999999999}
+      WHATSAPP_QR_SESSION_TTL_SECONDS: ${WHATSAPP_QR_SESSION_TTL_SECONDS:-120}
+      # Empty means the safe default (buttons_legacy). The only other value
+      # worth setting is native_flow_helper, and only after native buttons have
+      # been seen and tapped on a real handset -- see qr-bridge/.env.example.
+      QR_BRIDGE_INTERACTIVE_FORMAT: ${QR_BRIDGE_INTERACTIVE_FORMAT:-}
     volumes:
       - qr_bridge_data:/app/data
     healthcheck:
@@ -59,18 +108,33 @@ services:
       start_period: 20s
 
   backend: &backend
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_BACKEND:-1g}
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # Stamped into the image so a running container can be tied to a
+        # commit. Export APP_BUILD before `docker compose build`, e.g.
+        #   export APP_BUILD=$(git rev-parse --short HEAD)
+        APP_BUILD: ${APP_BUILD:-}
+        APP_VERSION: ${APP_VERSION:-1.0.0}
     restart: unless-stopped
     env_file: .env
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DB_HOST: postgres
       DB_PORT: 5432
+      # Host and database only. The password is applied by
+      # config.settings.base, which URL-quotes REDIS_PASSWORD before splicing
+      # it in -- a generated password containing "@", ":" or "/" would break a
+      # URL assembled by string concatenation here.
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       QR_PROVIDER_BASE_URL: http://qr-bridge:4001
       # qr-bridge calls this back over the internal Docker network to
       # deliver webhooks -- not the public site URL, so pairing/message
@@ -102,9 +166,63 @@ services:
 
   celery-worker:
     <<: *backend
-    command: ["celery", "-A", "config", "worker", "--loglevel=info"]
+    # Overrides the limit inherited from *backend. The worker is the process
+    # that grows: a campaign dispatch holds a batch of message rows and an
+    # import holds a chunk of CSV, so this is where an unbounded container
+    # would actually take the host down. Paired with --max-tasks-per-child
+    # below, which returns the peak to the OS periodically.
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_WORKER:-1g}
+    # -Q names every queue in settings.CELERY_QUEUE_NAMES, so this one worker
+    # still runs everything exactly as it did before queues were introduced.
+    # The list is explicit rather than omitted because a routed task whose
+    # queue nobody consumes does not fail -- it sits in Redis for ever, which
+    # looks identical to a worker that is simply idle.
+    #
+    # To stop a large import delaying campaign sends, run a second worker
+    # dedicated to the send path and take that queue off this one:
+    #
+    #   celery-messages:
+    #     <<: *backend
+    #     command: ["celery", "-A", "config", "worker", "-Q", "messages", "-c", "8", "--loglevel=info"]
+    #
+    # --max-tasks-per-child recycles a worker process periodically. Campaign
+    # dispatch holds a large batch of rows in memory, and a long-lived process
+    # that has handled a few thousand of those never returns the peak to the OS.
+    command:
+      - celery
+      - -A
+      - config
+      - worker
+      - --loglevel=info
+      - -Q
+      - celery,messages,campaigns,bulk,maintenance,webhooks
+      - --max-tasks-per-child=500
+      # Concurrency is set, not left to Celery's default of "one process per
+      # CPU". On a 24-core host that default is 24 Django processes at ~80 MB
+      # each -- about 2 GB for a worker whose work is almost entirely waiting
+      # on a provider's HTTP response. Four processes with the queue routing
+      # above is plenty; raise CELERY_CONCURRENCY (and MEM_LIMIT_WORKER with
+      # it) on a box that has the memory to spare.
+      - --concurrency=${CELERY_CONCURRENCY:-4}
+    # A real check rather than none. Every campaign, every message and every
+    # import runs here, so "the worker is up but not consuming" is the failure
+    # that looks exactly like nothing happening -- and with `disable: true`
+    # nothing anywhere reported it. `inspect ping` round-trips through the
+    # broker and back, so it fails if the worker is wedged *or* if it has lost
+    # Redis, which are the two ways sending stops.
+    #
+    # The interval is generous and the start period long: ping costs a broker
+    # round trip, and a worker still importing Django on a cold start is not
+    # unhealthy, it is starting.
     healthcheck:
-      disable: true
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,9 +233,23 @@ services:
 
   celery-beat:
     <<: *backend
-    command: ["celery", "-A", "config", "beat", "--loglevel=info"]
+    # Beat publishes on a timer and holds nothing, so it needs far less than
+    # the backend limit it would otherwise inherit.
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_BEAT:-256m}
+    command: ["celery", "-A", "config", "beat", "--loglevel=info", "--schedule", "/tmp/celerybeat-schedule"]
+    # Beat has no queue to inspect and answers no ping -- it only publishes on
+    # a timer. The honest check is that its scheduler file is still being
+    # written, which is the one observable thing a live beat does. Checking
+    # anything more would be inventing a signal.
     healthcheck:
-      disable: true
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule.db || test -f /tmp/celerybeat-schedule || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,6 +259,10 @@ services:
         condition: service_healthy
 
   nginx:
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_NGINX:-128m}
     build:
       context: .
       dockerfile: nginx/Dockerfile

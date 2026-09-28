@@ -1,4 +1,16 @@
+# Secrets must not reach the build context: this image is built with
+# `COPY . .`, so anything left here is baked into a layer and shipped. Every
+# .env*, not just ".env" -- a populated .env.env.bak-<timestamp> was inside
+# this context under the old rule.
 .env
+.env.*
+!.env.example
+*.bak
+*.bak-*
+*.orig
+*.pem
+*.key
+
 db.sqlite3
 media/
 staticfiles/
@@ -9,3 +21,16 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Database backups. A dump is the whole customer database in one file --
+# every phone number, every message, every encrypted provider credential.
+# It must never reach a Git history (from which it cannot be removed) or a
+# Docker build context (from which it is baked into a shipped layer).
+backups/
+*.dump
+*.dump.gpg
+*.sql.gz
+# Plain SQL dumps too. Nothing in this repository is a tracked .sql
+# file, so this costs nothing; if one is ever needed, force-add it.
+*.sql
+*.pgdump

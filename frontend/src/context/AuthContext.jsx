@@ -61,7 +61,57 @@ export function AuthProvider({ children }) {
         }
     }, []);
 
-    const logout = useCallback(() => {
+    const signup = useCallback(async (details) => {
+        // The response is a session, so a new customer lands in the product
+        // rather than on a "now go and sign in" page. `next` comes from the
+        // server, because the server is the only thing that knows whether a
+        // trial actually started -- see apps/accounts/signup_views.py.
+        try {
+            const response = await api.post("/auth/signup/", details);
+            localStorage.setItem("access_token", response.data.access);
+            localStorage.setItem("refresh_token", response.data.refresh);
+            localStorage.removeItem("impersonation_original_access");
+            localStorage.removeItem("impersonation_original_refresh");
+            localStorage.removeItem("impersonation_meta");
+            setImpersonation(null);
+            setUser(response.data.user);
+            return {
+                success: true,
+                next: response.data.next || "/",
+                subscription: response.data.subscription,
+                notice: response.data.notice || "",
+            };
+        } catch (error) {
+            return {
+                success: false,
+                // The backend's own sentence. It is deliberately the same for
+                // "this address is taken" and "these details are not usable",
+                // so the frontend must not try to be more specific than it.
+                message: apiErrorMessage(error, "We could not create your account. Please try again."),
+                code: error?.response?.data?.code || "",
+                fields: error?.response?.status === 400 ? error?.response?.data : null,
+            };
+        }
+    }, []);
+
+    const logout = useCallback(async () => {
+        // Tell the server first, then forget locally. Clearing localStorage on
+        // its own left the refresh token valid for its full lifetime, so
+        // signing out of a shared or lost machine protected nobody -- anyone
+        // holding a copy of that token could keep minting access tokens for a
+        // week. /auth/logout/ blacklists it.
+        //
+        // The local clear happens whatever the request does. A logout that
+        // fails because the network is down or the token had already expired
+        // must still get the user out of the session in front of them.
+        const refreshToken = localStorage.getItem("refresh_token");
+        if (refreshToken) {
+            try {
+                await api.post("/auth/logout/", { refresh: refreshToken });
+            } catch {
+                // Already expired, already blacklisted, or unreachable.
+            }
+        }
         localStorage.removeItem("access_token");
         localStorage.removeItem("refresh_token");
         localStorage.removeItem("impersonation_original_access");
@@ -111,12 +161,12 @@ export function AuthProvider({ children }) {
             localStorage.setItem("refresh_token", originalRefresh);
             await loadCurrentUser();
         } else {
-            logout();
+            await logout();
         }
     }, [loadCurrentUser, logout]);
 
     return (
-        <AuthContext.Provider value={{ user, loading, login, logout, loginAs, impersonation, exitImpersonation, refresh: loadCurrentUser }}>
+        <AuthContext.Provider value={{ user, loading, login, signup, logout, loginAs, impersonation, exitImpersonation, refresh: loadCurrentUser }}>
             {children}
         </AuthContext.Provider>
     );

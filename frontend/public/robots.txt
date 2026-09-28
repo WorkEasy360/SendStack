@@ -1,0 +1,66 @@
+# What a crawler may look at.
+#
+# Allow-nothing-by-default would be wrong here: this file is served from the
+# same origin as the application, and a blanket Disallow would also hide the
+# four pages that exist to be found. So the public pages are allowed and every
+# authenticated area is named.
+#
+# This is not access control and must never be mistaken for it. A Disallow is a
+# request, honoured by well-behaved crawlers and ignored by everything else,
+# and the paths below are readable to anyone who types them -- they simply
+# return a login screen. The real protection is that the API refuses the
+# request without a token. This file, and the noindex tag in index.html, exist
+# so that a link somebody pastes into a group chat does not end up in a search
+# index.
+
+User-agent: *
+
+Allow: /$
+Allow: /pricing
+Allow: /trust
+Allow: /terms
+Allow: /privacy
+Allow: /dpa
+
+# Everything a customer reaches only after signing in.
+Disallow: /campaigns
+Disallow: /contacts
+Disallow: /inbox
+Disallow: /reports
+Disallow: /pipeline
+Disallow: /tasks
+Disallow: /automation
+Disallow: /ai
+Disallow: /knowledge
+Disallow: /voice
+Disallow: /team
+Disallow: /templates
+Disallow: /whatsapp
+Disallow: /compliance
+Disallow: /business
+Disallow: /credits
+Disallow: /users
+Disallow: /branding
+Disallow: /plans
+Disallow: /billing
+Disallow: /onboarding
+Disallow: /customers
+Disallow: /settings
+Disallow: /support
+
+# Auth screens. Nothing to index, and an indexed password-reset URL is a
+# phishing template somebody else did not have to write.
+Disallow: /login
+Disallow: /signup
+Disallow: /forgot-password
+Disallow: /reset-password
+
+# The API, the admin, and the short public links. The redirect and
+# click-to-chat paths are meant to be tapped from a message, not crawled --
+# indexing them would attribute a customer's clicks to a bot.
+Disallow: /api/
+Disallow: /r/
+Disallow: /c/
+Disallow: /w/
+
+Sitemap: /sitemap.xml

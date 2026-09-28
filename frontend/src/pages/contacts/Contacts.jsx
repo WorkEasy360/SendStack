@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { BellOff, BellRing, Contact as ContactIcon, Download, Plus, Trash2, Upload } from "lucide-react";
+import { BellOff, BellRing, ClipboardPaste, Contact as ContactIcon, Download, Plus, Trash2, Upload } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
 import { runBulk, describeBulkFailures } from "../../services/bulk";
 import useSelection from "../../hooks/useSelection";
@@ -18,6 +18,7 @@ import BulkActionBar from "../../components/ui/BulkActionBar";
 import { TableSkeleton } from "../../components/ui/Skeleton";
 import { ChipToggle, Field, FileInput, Input, Select } from "../../components/ui/Field";
 import { useToast } from "../../components/ui/Toast";
+import PasteImport from "../../components/contacts/PasteImport";
 import {
     LIFECYCLE_OPTIONS,
     LifecycleBadge,
@@ -36,6 +37,8 @@ export default function Contacts() {
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
     const [subscribedFilter, setSubscribedFilter] = useState("");
+    const [consentFilter, setConsentFilter] = useState("");
+    const [whatsappFilter, setWhatsappFilter] = useState("");
     const [groupFilter, setGroupFilter] = useState("");
     const [smartSegment, setSmartSegment] = useState("");
     const [ownerFilter, setOwnerFilter] = useState("");
@@ -60,6 +63,7 @@ export default function Contacts() {
     const selection = useSelection(contacts);
 
     const [showImport, setShowImport] = useState(false);
+    const [showPaste, setShowPaste] = useState(false);
     const [importFile, setImportFile] = useState(null);
     const [importPreview, setImportPreview] = useState(null);
     const [previewing, setPreviewing] = useState(false);
@@ -80,6 +84,8 @@ export default function Contacts() {
         const {
             searchTerm = search,
             subscribed = subscribedFilter,
+        consent = consentFilter,
+            whatsapp_status = whatsappFilter,
             group = groupFilter,
             smart = smartSegment,
             owner = ownerFilter,
@@ -87,6 +93,8 @@ export default function Contacts() {
         const params = {};
         if (searchTerm) params.q = searchTerm;
         if (subscribed !== "") params.subscribed = subscribed;
+        if (consent) params.marketing_consent = consent;
+        if (whatsapp_status) params.whatsapp_status = whatsapp_status;
         if (group) params.groups = group;
         if (smart) params.smart = smart;
         if (owner) params.owner = owner;
@@ -157,6 +165,8 @@ export default function Contacts() {
 
     const applyFilter = (key, value) => {
         if (key === "subscribed") setSubscribedFilter(value);
+        if (key === "marketing_consent") setConsentFilter(value);
+        if (key === "whatsapp_status") setWhatsappFilter(value);
         if (key === "group") setGroupFilter(value);
         if (key === "owner") setOwnerFilter(value);
         loadAll({ [key]: value });
@@ -285,9 +295,7 @@ export default function Contacts() {
         try {
             const data = new FormData();
             data.append("file", file);
-            const response = await api.post("/contacts/imports/preview/", data, {
-                headers: { "Content-Type": "multipart/form-data" },
-            });
+            const response = await api.post("/contacts/imports/preview/", data);
             setImportPreview(response.data);
         } catch (err) {
             setImportError(apiErrorMessage(err, "Could not read that file."));
@@ -311,7 +319,7 @@ export default function Contacts() {
         try {
             const data = new FormData();
             data.append("file", importFile);
-            await api.post("/contacts/imports/", data, { headers: { "Content-Type": "multipart/form-data" } });
+            await api.post("/contacts/imports/", data);
             closeImport();
             toast.success("Import started. Contacts appear as the file is processed.");
             await loadAll();
@@ -337,7 +345,9 @@ export default function Contacts() {
         }
     };
 
-    const hasFilters = Boolean(search || subscribedFilter !== "" || groupFilter || smartSegment || ownerFilter);
+    const hasFilters = Boolean(
+        search || subscribedFilter !== "" || consentFilter || whatsappFilter || groupFilter || smartSegment || ownerFilter
+    );
 
     const columns = [
         {
@@ -422,9 +432,28 @@ export default function Contacts() {
             key: "subscribed",
             header: "Status",
             render: (contact) => (
-                <Badge tone={contact.subscribed ? "green" : "gray"}>
-                    {contact.subscribed ? "Subscribed" : "Unsubscribed"}
-                </Badge>
+                // Two separate facts, so two separate badges. "Subscribed"
+                // answers "have they told us to stop"; the consent badge
+                // answers "did they ever say yes, and can we show where".
+                // Collapsing them into one status is the confusion the whole
+                // consent model exists to prevent -- see docs/CONSENT.md.
+                <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone={contact.subscribed ? "green" : "gray"}>
+                        {contact.subscribed ? "Subscribed" : "Unsubscribed"}
+                    </Badge>
+                    {contact.marketing_consent === "GRANTED" && (
+                        <Badge tone="blue">Consent on file</Badge>
+                    )}
+                    {contact.marketing_consent === "DENIED" && (
+                        <Badge tone="gray">Consent refused</Badge>
+                    )}
+                    {contact.whatsapp_status === "ON_WHATSAPP" && (
+                        <Badge tone="violet">On WhatsApp</Badge>
+                    )}
+                    {contact.whatsapp_status === "NOT_ON_WHATSAPP" && (
+                        <Badge tone="red">Not on WhatsApp</Badge>
+                    )}
+                </div>
             ),
         },
         {
@@ -457,6 +486,9 @@ export default function Contacts() {
                         <Button variant="secondary" icon={Download} onClick={exportContacts} loading={exporting}>
                             Export
                         </Button>
+                        <Button variant="secondary" icon={ClipboardPaste} onClick={() => setShowPaste(true)}>
+                            Paste list
+                        </Button>
                         <Button variant="secondary" icon={Upload} onClick={() => setShowImport(true)}>
                             Import CSV
                         </Button>
@@ -484,8 +516,8 @@ export default function Contacts() {
                                 onClick={() => applySmart(segment.key)}
                                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap border cursor-pointer transition-colors ${
                                     smartSegment === segment.key
-                                        ? "bg-ink-900 text-white border-ink-900"
-                                        : "bg-white text-ink-600 border-ink-200 hover:border-ink-400 hover:text-ink-900"
+                                        ? "bg-ink-900 text-ink-50 border-ink-900"
+                                        : "bg-surface text-ink-600 border-ink-200 hover:border-ink-400 hover:text-ink-900"
                                 }`}
                             >
                                 {segment.label}
@@ -526,6 +558,23 @@ export default function Contacts() {
                         </option>
                     ))}
                 </Select>
+                {/*
+                  The workflow the consent audit asked for: "show me everyone I
+                  have no consent on file for". It is the first question anybody
+                  asks before turning consent enforcement on, and without it the
+                  only answer is a CSV export and a spreadsheet.
+                */}
+                <Select
+                    value={consentFilter}
+                    onChange={(event) => applyFilter("marketing_consent", event.target.value)}
+                    aria-label="Filter by marketing consent"
+                    className="w-full sm:w-48"
+                >
+                    <option value="">Any consent state</option>
+                    <option value="GRANTED">Consent recorded</option>
+                    <option value="UNKNOWN">No consent recorded</option>
+                    <option value="DENIED">Consent refused</option>
+                </Select>
                 <Select
                     value={subscribedFilter}
                     onChange={(event) => applyFilter("subscribed", event.target.value)}
@@ -535,6 +584,21 @@ export default function Contacts() {
                     <option value="">All statuses</option>
                     <option value="true">Subscribed</option>
                     <option value="false">Unsubscribed</option>
+                </Select>
+                {/*
+                  Stamped by the number filter. "Not checked" is the honest
+                  default for every contact nobody has run it over.
+                */}
+                <Select
+                    value={whatsappFilter}
+                    onChange={(event) => applyFilter("whatsapp_status", event.target.value)}
+                    aria-label="Filter by WhatsApp registration"
+                    className="w-full sm:w-48"
+                >
+                    <option value="">Any WhatsApp status</option>
+                    <option value="ON_WHATSAPP">On WhatsApp</option>
+                    <option value="NOT_ON_WHATSAPP">Not on WhatsApp</option>
+                    <option value="UNKNOWN">Not checked</option>
                 </Select>
                 <Select
                     value={groupFilter}
@@ -591,6 +655,34 @@ export default function Contacts() {
                 >
                     Resubscribe
                 </Button>
+                {/*
+                  Recording where a list came from, which is a different act
+                  from re-subscribing somebody: this states evidence, that one
+                  states a change of mind. The backend keeps them apart too --
+                  recording consent never clears an opt-out, whatever a
+                  spreadsheet claims. See docs/CONSENT.md.
+                */}
+                <Select
+                    value=""
+                    disabled={bulkBusy}
+                    aria-label="Record where consent for the selected contacts came from"
+                    className="w-52"
+                    onChange={(event) => {
+                        const source = event.target.value;
+                        if (!source) return;
+                        event.target.value = "";
+                        runBulkAction("grant_consent", { source });
+                    }}
+                >
+                    <option value="">Record consent from…</option>
+                    <option value="WEBSITE">Website</option>
+                    <option value="FORM">Opt-in form</option>
+                    <option value="CRM">CRM or other system</option>
+                    <option value="CSV">File import</option>
+                    <option value="CUSTOMER_PROVIDED">Provided by the customer</option>
+                    <option value="MANUAL">Entered by a team member</option>
+                    <option value="OTHER">Other</option>
+                </Select>
                 {team.length > 0 && (
                     <Select
                         value={bulkOwner}
@@ -716,11 +808,14 @@ export default function Contacts() {
                             <EmptyState
                                 icon={ContactIcon}
                                 title="No contacts yet"
-                                description="Add a contact manually or import a CSV file to get started."
+                                description="Add a contact manually or import a CSV or Excel file to get started."
                                 action={
                                     <div className="flex flex-wrap gap-2 justify-center">
                                         <Button icon={Plus} onClick={openCreate}>
                                             Add Contact
+                                        </Button>
+                                        <Button variant="secondary" icon={ClipboardPaste} onClick={() => setShowPaste(true)}>
+                                            Paste list
                                         </Button>
                                         <Button variant="secondary" icon={Upload} onClick={() => setShowImport(true)}>
                                             Import CSV
@@ -824,21 +919,34 @@ export default function Contacts() {
                 />
             )}
 
+            {showPaste && (
+                <PasteImport
+                    groups={groups}
+                    tags={tags}
+                    onClose={() => setShowPaste(false)}
+                    onImported={(result) => {
+                        setShowPaste(false);
+                        toast.success(result.detail);
+                        load();
+                    }}
+                />
+            )}
+
             {showImport && (
                 <Modal
                     title="Import contacts"
-                    description="Pick a CSV. We work out which column is which — you just check it looks right."
+                    description="Pick a CSV or Excel (.xlsx) file. We work out which column is which — you just check it looks right."
                     onClose={closeImport}
                     width="lg"
                 >
                     <form onSubmit={runImport}>
                         <Alert>{importError}</Alert>
                         <Field
-                            label="CSV file"
+                            label="CSV or Excel file"
                             hint="Any column names. Whatever we cannot place is kept as a custom field."
                             required
                         >
-                            <FileInput accept=".csv" onChange={(e) => previewImport(e.target.files[0])} required />
+                            <FileInput accept=".csv,.xlsx" onChange={(e) => previewImport(e.target.files[0])} required />
                         </Field>
 
                         {previewing && (

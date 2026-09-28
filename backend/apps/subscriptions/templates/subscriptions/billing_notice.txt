@@ -1,0 +1,25 @@
+{% comment %}
+Plain text, autoescape off -- the same reasoning as the account mails: nothing
+here is rendered as HTML, and escaping only mangles apostrophes and ampersands
+in a product name.
+
+Addressed to a workspace rather than to a person, so there is no username line:
+this mail is bcc'd to everyone in the workspace and naming one of them would be
+wrong for the others.
+{% endcomment %}{% autoescape off %}{{ product_name }}
+
+{{ title }}
+
+{{ body }}
+{% if plan_name %}
+Plan: {{ plan_name }}{% endif %}{% if trial_ends_on %}
+Trial ends: {{ trial_ends_on }}{% endif %}{% if period_ends_on %}
+Current period ends: {{ period_ends_on }}{% endif %}
+{% if action_url %}
+Manage your plan: {{ action_url }}
+{% endif %}{% if support_email %}
+Need help? Email {{ support_email }}.{% endif %}{% if support_url %}
+Support: {{ support_url }}{% endif %}
+
+This message was sent to the {{ product_name }} workspace this account belongs to.
+{% endautoescape %}

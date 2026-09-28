@@ -7,6 +7,8 @@ from rest_framework.views import APIView
 
 from core.bulk import BulkActionError, BulkActionMixin
 
+from apps.ai.providers.registry import CUSTOM as CUSTOM_MODEL_PROVIDER
+
 from . import services
 from .models import CallSession, VoiceAgentConfig
 from .providers.base import VoiceProviderError
@@ -228,12 +230,17 @@ class VoiceReadinessView(APIView):
             "enabled": bool(config.is_enabled),
             "carrier_credentials": bool(config.has_carrier_credentials),
             "model_api_key": bool(agent.api_key(config)),
+            "model_base_url": config.model_provider != CUSTOM_MODEL_PROVIDER or bool(config.base_url),
             "public_callback_url": bool(services.public_base_url()),
         }
         problems = {
             "enabled": "The calling agent is switched off.",
             "carrier_credentials": "Add a Twilio Account SID, Auth Token and a number to call from.",
-            "model_api_key": "Add an Anthropic API key, or set AI_API_KEY for the whole deployment.",
+            "model_api_key": (
+                f"Add an API key for {config.get_model_provider_display()}, "
+                "or set AI_API_KEY for the whole deployment."
+            ),
+            "model_base_url": "Add the custom endpoint's base URL on the Calling Agent page.",
             "public_callback_url": (
                 "Set VOICE_PUBLIC_BASE_URL to a URL Twilio can reach (a tunnel, or your public domain)."
             ),

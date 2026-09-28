@@ -32,7 +32,7 @@ class CustomUserAdmin(UserAdmin):
 
     fieldsets = UserAdmin.fieldsets + (
         (
-            "MultiSender Information",
+            "SendStack Information",
             {
                 "fields": (
                     "role",

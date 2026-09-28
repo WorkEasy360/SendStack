@@ -1,4 +1,5 @@
 .git/
+.gitignore
 .venv/
 backend/.venv/
 backend/media/
@@ -6,4 +7,35 @@ backend/staticfiles/
 backend/db.sqlite3
 frontend/node_modules/
 frontend/dist/
+qr-bridge/node_modules/
+qr-bridge/dist/
+qr-bridge/data/
 **/__pycache__/
+
+# Secrets must not reach the build context at all -- anything here can be
+# COPYed into a layer and shipped, and a layer is not deletable after the
+# fact. The pattern is every .env*, not ".env": the populated backup that
+# prompted this (backend/.env.env.bak-20260827-184120) was already inside the
+# context under the old rules.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.bak
+**/*.bak-*
+**/*.orig
+**/*.pem
+**/*.key
+
+# Database backups. A dump is the whole customer database in one file --
+# every phone number, every message, every encrypted provider credential.
+# It must never reach a Git history (from which it cannot be removed) or a
+# Docker build context (from which it is baked into a shipped layer).
+backups/
+**/backups/
+*.dump
+*.dump.gpg
+*.sql.gz
+# Plain SQL dumps too. Nothing in this repository is a tracked .sql
+# file, so this costs nothing; if one is ever needed, force-add it.
+*.sql
+*.pgdump

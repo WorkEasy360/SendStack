@@ -22,13 +22,13 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from core.buttons import MAX_REPLY_BUTTONS, REPLY
+from core.buttons import MAX_REPLY_BUTTONS, REPLY, URL
 
 from .keywords import OPT_OUT_BUTTON_ID, is_start, is_stop
 from .models import CompliancePolicy, ConsentEvent
 from .timezones import load_zone, zone_for_country
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 #: Longest a message may be held for quiet hours. A window is at most a day
 #: wide, so anything beyond this means a misconfigured policy (start == end
@@ -58,7 +58,8 @@ def record_consent(contact, event, *, source, actor=None, message=None, detail="
         contact.save(update_fields=["subscribed", "unsubscribed_at", "updated_at"])
 
     ConsentEvent.objects.create(
-        tenant_id=contact.tenant_id, contact=contact, event=event, source=source,
+        tenant_id=contact.tenant_id, contact=contact, phone=contact.phone,
+        event=event, source=source,
         actor=actor if actor is not None and getattr(actor, "pk", None) else None,
         message=message, detail=detail[:255],
     )
@@ -81,6 +82,119 @@ def opt_in(contact, *, source, actor=None, message=None, detail="") -> bool:
     return record_consent(
         contact, ConsentEvent.Event.OPT_IN, source=source, actor=actor, message=message, detail=detail,
     )
+
+
+# ---------------------------------------------------------------------------
+# The precedence rule
+# ---------------------------------------------------------------------------
+
+#: Returned by `may_receive_marketing` alongside the answer, so the caller can
+#: put the real reason on the message row rather than inventing wording.
+BLOCKED_UNSUBSCRIBED = "This contact has unsubscribed and was not messaged."
+BLOCKED_NO_CONSENT = (
+    "This contact has no recorded marketing consent, and this workspace only "
+    "sends marketing to contacts who have given it."
+)
+
+
+def may_receive_marketing(contact, policy=None) -> tuple:
+    """
+    Whether a marketing message may go to this contact. Returns ``(ok, reason)``.
+
+    **The one place the precedence rule lives:**
+
+        explicit opt-out  >  marketing consent  >  campaign eligibility
+
+    An opt-out is checked first and is absolute. Nothing outranks it: not a
+    later import claiming consent, not a CRM sync, not a workflow, not the AI
+    agent, not a plan that has paid for the feature. That ordering is the whole
+    reason this is a function and not three checks in three call sites.
+
+    The second rule is opt-in, and it only applies where the tenant has asked
+    for it (CompliancePolicy.require_marketing_consent). A contact whose
+    consent was never recorded is UNKNOWN, and UNKNOWN is refused under that
+    setting -- refusing is the only safe reading of "we do not know".
+
+    Called from `apps.messaging.gating.evaluate` and from nowhere else on the
+    send path, so a new sending feature inherits it by construction.
+    """
+    from apps.contacts.models import Contact
+
+    if contact is None:
+        # No contact at all: a bare number typed into the composer. There is
+        # nobody to have a recorded opt-out, and the caller (a person, in the
+        # inbox) is the one making the decision.
+        return True, ""
+
+    if not contact.subscribed:
+        return False, BLOCKED_UNSUBSCRIBED
+
+    if policy is None:
+        policy = CompliancePolicy.for_tenant(contact.tenant_id)
+
+    if not policy.require_marketing_consent:
+        return True, ""
+
+    if contact.marketing_consent == Contact.MarketingConsent.GRANTED:
+        return True, ""
+
+    return False, BLOCKED_NO_CONSENT
+
+
+def set_marketing_consent(contact, granted: bool, *, source, actor=None, reference="", detail="") -> bool:
+    """
+    Record a positive (or negative) marketing-consent decision, with its evidence.
+
+    Returns whether anything changed.
+
+    **Never clears an opt-out.** Granting consent sets the consent fields and
+    nothing else: somebody who replied STOP stays unsubscribed until they
+    themselves say otherwise, whatever a spreadsheet uploaded afterwards
+    claims. Re-subscribing is `opt_in`, which is a separate, deliberate act.
+    """
+    from apps.contacts.models import Contact
+
+    value = Contact.MarketingConsent.GRANTED if granted else Contact.MarketingConsent.DENIED
+    if contact.marketing_consent == value and contact.consent_source == (source or ""):
+        return False
+
+    contact.marketing_consent = value
+    contact.consent_source = source or ""
+    contact.consent_at = timezone.now()
+    contact.consent_reference = (reference or "")[:120]
+    contact.save(update_fields=[
+        "marketing_consent", "consent_source", "consent_at", "consent_reference", "updated_at",
+    ])
+
+    # The append-only log gets a row either way, because "we recorded consent
+    # from the website on this date" is exactly the fact that has to survive
+    # somebody later editing the contact.
+    ConsentEvent.objects.create(
+        tenant_id=contact.tenant_id,
+        contact=contact,
+        phone=contact.phone,
+        event=ConsentEvent.Event.OPT_IN if granted else ConsentEvent.Event.OPT_OUT,
+        source=_event_source_for(source),
+        actor=actor if actor is not None and getattr(actor, "pk", None) else None,
+        detail=(detail or f"Marketing consent {'recorded' if granted else 'refused'} ({source or 'unspecified'}).")[:255],
+    )
+    return True
+
+
+def _event_source_for(consent_source: str) -> str:
+    """Map a Contact.ConsentSource onto the ConsentEvent.Source that matches it."""
+    mapping = {
+        "MANUAL": ConsentEvent.Source.AGENT,
+        "WEBSITE": ConsentEvent.Source.WEBSITE,
+        "FORM": ConsentEvent.Source.FORM,
+        "CRM": ConsentEvent.Source.CRM,
+        "API": ConsentEvent.Source.API,
+        "CSV": ConsentEvent.Source.IMPORT,
+        "CUSTOMER_PROVIDED": ConsentEvent.Source.CUSTOMER_PROVIDED,
+        "INBOUND": ConsentEvent.Source.INBOUND_KEYWORD,
+        "OTHER": ConsentEvent.Source.OTHER,
+    }
+    return mapping.get(consent_source or "", ConsentEvent.Source.SYSTEM)
 
 
 def handle_inbound(inbound_message) -> bool:
@@ -248,11 +362,17 @@ def apply_opt_out_affordance(policy, *, body, caption, buttons, supports_buttons
     A tenant that has asked for the button style gets a tappable button
     wherever one fits, because a button is honoured exactly while a typed
     reply is only honoured as well as the keyword list reads it. It doesn't
-    always fit: WhatsApp caps reply buttons at three, a link button cannot be
-    mixed with reply buttons at all, an interactive message needs body text to
-    hang the buttons under, and not every connection can send one at all.
-    Every one of those cases falls back to the footer line rather than
-    silently shipping a campaign with no opt-out on it.
+    always fit: WhatsApp caps reply buttons at three, an interactive message
+    needs body text to hang the buttons under, and not every connection can
+    send one at all. Every one of those cases falls back to the footer line
+    rather than silently shipping a campaign with no opt-out on it.
+
+    The subtle one is a message whose only button is a link. Reply and link
+    buttons can now sit in the same list, but only one kind survives as a
+    button on the wire (see ``core.buttons.plan_delivery``) and reply buttons
+    win -- so adding an unsubscribe button here would quietly demote the
+    author's link to a line of text. The footer is used instead: it costs the
+    tap on the opt-out, not the tap on the message's own call to action.
 
     Returns the fields to apply, so the caller stores exactly what will be
     sent -- the message row is the record of what the contact was offered.
@@ -261,19 +381,31 @@ def apply_opt_out_affordance(policy, *, body, caption, buttons, supports_buttons
     if _has_opt_out(body, caption, buttons, policy.opt_out_footer):
         return {"body": body, "caption": caption, "buttons": buttons}
 
+    replies = [button for button in buttons if (button or {}).get("type", REPLY) == REPLY]
+    has_tappable_link = not replies and any((button or {}).get("type") == URL for button in buttons)
+
     can_add_button = (
         policy.opt_out_style == CompliancePolicy.OptOutStyle.BUTTON
         and supports_buttons
         and (body or "").strip()
-        and all((button or {}).get("type", REPLY) == REPLY for button in buttons)
-        and len(buttons) < MAX_REPLY_BUTTONS
+        and not has_tappable_link
+        and len(replies) < MAX_REPLY_BUTTONS
     )
     if can_add_button:
-        buttons.append({
+        # Placed after the last reply button rather than at the end of the
+        # list, so the numbered fallback reads "1. Yes / 2. No / 3. Unsubscribe"
+        # with the link line beneath, instead of the opt-out trailing after it.
+        position = max(
+            (index for index, button in enumerate(buttons)
+             if (button or {}).get("type", REPLY) == REPLY),
+            default=-1,
+        ) + 1
+        buttons.insert(position, {
             "type": REPLY,
             "id": OPT_OUT_BUTTON_ID,
             "title": (policy.opt_out_button_title or "Unsubscribe")[:20],
             "url": "",
+            "phone": "",
         })
         return {"body": body, "caption": caption, "buttons": buttons}
 

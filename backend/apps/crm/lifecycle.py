@@ -26,7 +26,7 @@ from apps.contacts.models import Contact
 from . import activity
 from .models import Activity
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 #: How far along the ladder each status sits. Automatic promotion may only
 #: move a contact *up* this order, so an automation cannot undo a person.

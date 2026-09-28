@@ -1,0 +1,14 @@
+# The bridge is built with `COPY src/` only, but keep secrets and live
+# Baileys session state out of the context regardless -- data/ holds device
+# credentials for connected WhatsApp numbers.
+.env
+.env.*
+!.env.example
+*.bak
+*.bak-*
+*.pem
+*.key
+
+node_modules/
+dist/
+data/

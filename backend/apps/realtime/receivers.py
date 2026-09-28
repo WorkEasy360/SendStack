@@ -18,7 +18,7 @@ from apps.messaging.models import Message
 
 from . import events
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def _message_payload(message) -> dict:

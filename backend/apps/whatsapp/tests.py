@@ -453,7 +453,7 @@ class ConnectionManagerCloudApiTests(TestCase):
         result = ConnectionManager.send_text_message(self.account, "15551234567", "hi")
 
         self.assertTrue(result.success)
-        mock_send.assert_called_once_with(self.account, "15551234567", "hi")
+        mock_send.assert_called_once_with(self.account, "15551234567", "hi", operation_id="")
 
     @patch("apps.whatsapp.providers.cloud_api.WhatsAppCloudAPIProvider.get_account_info")
     def test_test_credentials_does_not_mutate_status(self, mock_info):
@@ -724,14 +724,14 @@ class WhatsAppAccountApiTests(TestCase):
         statuses = {item["name"]: item["status"] for item in response.json()["results"]}
         self.assertEqual(statuses["Never Scanned"], WhatsAppAccount.Status.EXPIRED)
 
-    def test_deleting_a_device_with_history_is_refused_without_disconnecting_it(self):
-        # Campaign/Message hold PROTECT references. The refusal has to come
-        # before the provider teardown and the audit entry, or a delete the
-        # database rejects still drops the connection and logs a "deleted"
-        # event for a device that is still there.
+    def test_deleting_a_device_with_history_archives_it_instead_of_refusing(self):
+        # Campaign/Message hold PROTECT references, so the row has to survive
+        # for the reports that join through it -- but the user's delete still
+        # goes through: the device is disconnected, archived, and gone from
+        # every device query.
         from apps.campaigns.models import Campaign
 
-        Campaign.objects.create(
+        campaign = Campaign.objects.create(
             tenant=self.tenant_a, created_by=self.user_a, whatsapp_account=self.account_a,
             name="Winter promo", message_body="hi",
         )
@@ -739,10 +739,37 @@ class WhatsAppAccountApiTests(TestCase):
         with patch("apps.whatsapp.services.WhatsAppConnectionService.disconnect") as mock_disconnect:
             response = self.client.delete(f"/api/v1/whatsapp/accounts/{self.account_a.pk}/")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("1 campaign", response.json()["detail"])
-        mock_disconnect.assert_not_called()
-        self.assertTrue(WhatsAppAccount.objects.filter(pk=self.account_a.pk).exists())
+        self.assertEqual(response.status_code, 204)
+        mock_disconnect.assert_called_once()
+        self.assertFalse(WhatsAppAccount.objects.filter(pk=self.account_a.pk).exists())
+        archived = WhatsAppAccount.all_objects.get(pk=self.account_a.pk)
+        self.assertIsNotNone(archived.archived_at)
+        self.assertEqual(archived.status, WhatsAppAccount.Status.DISCONNECTED)
+        # The history it was kept for still resolves.
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.whatsapp_account_id, archived.pk)
+
+    def test_an_archived_device_is_gone_from_the_list_and_frees_its_plan_slot(self):
+        from apps.messaging.models import Message
+
+        Message.objects.create(
+            tenant=self.tenant_a, whatsapp_account=self.account_a, to_phone="+15551230009",
+            status=Message.Status.SENT,
+        )
+
+        with patch("apps.whatsapp.services.WhatsAppConnectionService.disconnect"):
+            self.client.delete(f"/api/v1/whatsapp/accounts/{self.account_a.pk}/")
+
+        listed = self.client.get("/api/v1/whatsapp/accounts/").json()
+        rows = listed["results"] if isinstance(listed, dict) else listed
+        self.assertNotIn(self.account_a.pk, [row["id"] for row in rows])
+        # `objects` is the default manager, so the plan's device count (and
+        # every picker) stops seeing it too.
+        self.assertEqual(WhatsAppAccount.objects.filter(tenant=self.tenant_a).count(), 0)
+        # ...and it can never be fetched or reconnected through the API again.
+        self.assertEqual(
+            self.client.get(f"/api/v1/whatsapp/accounts/{self.account_a.pk}/").status_code, 404
+        )
 
     def test_deleting_a_device_without_history_succeeds(self):
         with patch("apps.whatsapp.services.WhatsAppConnectionService.disconnect") as mock_disconnect:
@@ -1070,7 +1097,7 @@ class WhatsAppAccountBulkActionTests(TestCase):
         self.assertEqual(mock_disconnect.call_count, 2)
 
     @patch("apps.whatsapp.views.WhatsAppConnectionService.disconnect")
-    def test_a_device_with_history_is_refused_and_the_rest_still_go(self, mock_disconnect):
+    def test_a_device_with_history_is_archived_and_the_batch_still_succeeds(self, mock_disconnect):
         clean = _make_account(self.tenant, self.user, name="Clean")
         used = _make_account(self.tenant, self.user, name="Used")
         Message.objects.create(
@@ -1079,15 +1106,15 @@ class WhatsAppAccountBulkActionTests(TestCase):
 
         response = self._bulk("delete", [clean.pk, used.pk])
 
-        self.assertEqual(response.status_code, 207, response.content)
+        self.assertEqual(response.status_code, 200, response.content)
         body = response.json()
-        self.assertEqual((body["succeeded"], body["failed"]), (1, 1))
-        self.assertEqual(body["errors"][0]["id"], used.pk)
-        self.assertIn("cannot be deleted", body["errors"][0]["detail"])
-        # The refused device keeps its connection: the history check runs
-        # before anything destructive, in bulk exactly as it does singly.
-        self.assertTrue(WhatsAppAccount.objects.filter(pk=used.pk).exists())
-        self.assertEqual(mock_disconnect.call_count, 1)
+        self.assertEqual((body["succeeded"], body["failed"]), (2, 0))
+        # Both are gone from the tenant's devices; only the used one is still
+        # a row, archived, so its message keeps a device to report against.
+        self.assertEqual(WhatsAppAccount.objects.count(), 0)
+        self.assertFalse(WhatsAppAccount.all_objects.filter(pk=clean.pk).exists())
+        self.assertIsNotNone(WhatsAppAccount.all_objects.get(pk=used.pk).archived_at)
+        self.assertEqual(mock_disconnect.call_count, 2)
 
     @patch("apps.whatsapp.views.WhatsAppConnectionService.disconnect")
     def test_bulk_disconnect_leaves_the_devices_in_place(self, mock_disconnect):
@@ -1136,12 +1163,123 @@ class MediaLinkRewritingTests(TestCase):
                 _reachable_link("http://localhost/media/x.png"), "http://localhost/media/x.png"
             )
 
+    def test_rewrites_a_link_frozen_with_a_dev_server_origin(self):
+        """
+        The regression this exists for.
+
+        An attachment uploaded through a Django run outside Docker is stored
+        with "http://127.0.0.1:8000" baked into the template and into every
+        message copied from it. That origin is not MEDIA_PUBLIC_BASE_URL, so a
+        literal prefix match handed it to the bridge untouched -- where
+        127.0.0.1 is the bridge itself and the send failed with
+        "connect ECONNREFUSED 127.0.0.1:8000" after burning every retry.
+        """
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["localhost"],
+        ):
+            self.assertEqual(
+                _reachable_link("http://127.0.0.1:8000/media/message_media/tenant_1/x.jpeg"),
+                "http://nginx/media/message_media/tenant_1/x.jpeg",
+            )
+
+    def test_rewrites_a_link_carrying_a_previous_domain(self):
+        """A domain the deployment still answers for names the same file."""
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="https://new.example.com",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["new.example.com", ".old.example.com"],
+        ):
+            self.assertEqual(
+                _reachable_link("https://old.example.com/media/message_media/x.png"),
+                "http://nginx/media/message_media/x.png",
+            )
+
+    def test_leaves_an_external_host_alone_even_under_the_media_path(self):
+        """
+        Ours is decided by the host, not by the path. Someone else's
+        /media/ directory is not ours to redirect at our own nginx.
+        """
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["localhost"],
+        ):
+            self.assertEqual(
+                _reachable_link("https://cdn.example.com/media/x.png"),
+                "https://cdn.example.com/media/x.png",
+            )
+
+    def test_a_wildcard_allowed_host_does_not_claim_the_whole_internet(self):
+        """
+        ALLOWED_HOSTS=["*"] is normal in development. Reading it as "every
+        host is ours" would rewrite a customer's own CDN link into a 404.
+        """
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["*"],
+        ):
+            self.assertEqual(
+                _reachable_link("https://cdn.example.com/media/x.png"),
+                "https://cdn.example.com/media/x.png",
+            )
+
+    def test_keeps_the_query_string(self):
+        """A signed or versioned link loses its meaning without the query."""
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["localhost"],
+        ):
+            self.assertEqual(
+                _reachable_link("http://localhost/media/x.png?v=2"),
+                "http://nginx/media/x.png?v=2",
+            )
+
+    def test_leaves_a_non_media_path_on_our_own_host_alone(self):
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost",
+            MEDIA_INTERNAL_BASE_URL="http://nginx",
+            ALLOWED_HOSTS=["localhost"],
+        ):
+            self.assertEqual(
+                _reachable_link("http://localhost/static/x.png"),
+                "http://localhost/static/x.png",
+            )
+
+    def test_leaves_a_data_url_alone(self):
+        from .providers.qr_bridge import _reachable_link
+
+        with override_settings(
+            MEDIA_PUBLIC_BASE_URL="http://localhost", MEDIA_INTERNAL_BASE_URL="http://nginx"
+        ):
+            self.assertEqual(_reachable_link("data:image/png;base64,AAAA"), "data:image/png;base64,AAAA")
+
 
 class CloudAPIInteractiveMessageTests(TestCase):
     """
     Reply buttons and a link button are two different Cloud API interactive
-    types, not two shapes of one payload -- which is why they can't be mixed
-    on a single message.
+    types, not two shapes of one payload -- so a message carrying both cannot
+    put both on the wire as buttons.
+
+    It is still accepted, because refusing it helps nobody: ``plan_delivery``
+    keeps one kind tappable and writes the rest into the body, and these tests
+    pin *which* kind survives. Getting that backwards would drop the taps
+    automation is matched on.
     """
 
     def setUp(self):
@@ -1200,6 +1338,72 @@ class CloudAPIInteractiveMessageTests(TestCase):
 
         self.assertFalse(result.success)
 
+    @patch("apps.whatsapp.providers.cloud_api.requests.Session.request")
+    def test_a_mixed_list_keeps_the_reply_buttons_and_spells_out_the_rest(self, mock_request):
+        mock_request.return_value = Mock(ok=True, json=lambda: {"messages": [{"id": "wamid.i3"}]})
+
+        result = self.provider.send_interactive_message(
+            self.account, "15551234567", "Coming on Friday?",
+            [
+                {"type": "REPLY", "id": "yes", "title": "Yes", "url": "", "phone": ""},
+                {"type": "URL", "id": "", "title": "Directions", "url": "https://example.test/map", "phone": ""},
+                {"type": "CALL", "id": "", "title": "Call us", "url": "", "phone": "+919876543210"},
+            ],
+        )
+
+        self.assertTrue(result.success)
+        interactive = mock_request.call_args.kwargs["json"]["interactive"]
+        # The reply button keeps its tap: it is the only kind an answer comes
+        # back from, so losing it would unhook the automation behind it.
+        self.assertEqual(interactive["type"], "button")
+        self.assertEqual(
+            interactive["action"]["buttons"],
+            [{"type": "reply", "reply": {"id": "yes", "title": "Yes"}}],
+        )
+        self.assertEqual(
+            interactive["body"]["text"],
+            "Coming on Friday?\n\nDirections: https://example.test/map\nCall us: +919876543210",
+        )
+
+    @patch("apps.whatsapp.providers.cloud_api.requests.Session.request")
+    def test_a_link_beside_a_call_button_still_takes_the_cta_envelope(self, mock_request):
+        mock_request.return_value = Mock(ok=True, json=lambda: {"messages": [{"id": "wamid.i4"}]})
+
+        result = self.provider.send_interactive_message(
+            self.account, "15551234567", "New arrivals are up",
+            [
+                {"type": "URL", "id": "", "title": "Shop now", "url": "https://example.test/shop", "phone": ""},
+                {"type": "CALL", "id": "", "title": "Call us", "url": "", "phone": "+919876543210"},
+            ],
+        )
+
+        self.assertTrue(result.success)
+        interactive = mock_request.call_args.kwargs["json"]["interactive"]
+        self.assertEqual(interactive["type"], "cta_url")
+        self.assertEqual(
+            interactive["body"]["text"], "New arrivals are up\n\nCall us: +919876543210"
+        )
+
+    @patch("apps.whatsapp.providers.cloud_api.requests.Session.request")
+    def test_a_call_button_alone_is_sent_as_text_rather_than_refused(self, mock_request):
+        """
+        There is no interactive envelope a call button fits in, and an
+        interactive message with an empty action is a 400 from Meta. Sending
+        the labelled number is what a call button was always going to arrive
+        as -- failing the send instead would lose the whole message.
+        """
+        mock_request.return_value = Mock(ok=True, json=lambda: {"messages": [{"id": "wamid.i5"}]})
+
+        result = self.provider.send_interactive_message(
+            self.account, "15551234567", "Need help?",
+            [{"type": "CALL", "id": "", "title": "Call now", "url": "", "phone": "+919876543210"}],
+        )
+
+        self.assertTrue(result.success)
+        payload = mock_request.call_args.kwargs["json"]
+        self.assertEqual(payload["type"], "text")
+        self.assertEqual(payload["text"]["body"], "Need help?\n\nCall now: +919876543210")
+
 
 class QRBridgeInteractiveMessageTests(TestCase):
     """
@@ -1220,8 +1424,16 @@ class QRBridgeInteractiveMessageTests(TestCase):
             webhook_secret="test-webhook-secret",
         )
 
-    def test_the_bridge_advertises_interactive_support(self):
-        self.assertTrue(self.provider.supports_interactive_buttons)
+    def test_the_bridge_does_not_advertise_interactive_support(self):
+        # The relay below works and is kept, but WhatsApp reserves interactive
+        # messages for the Cloud API: a linked device can put one on the wire,
+        # get an id back, and have the recipient's phone render the body with
+        # no buttons under it. Measured live: 15 sent, zero taps ever.
+        #
+        # Advertising support we do not have is what suppressed the numbered
+        # fallback, so the flag states what actually reaches a phone. Flipping
+        # it back is the whole change if Meta ever opens this up.
+        self.assertFalse(self.provider.supports_interactive_buttons)
 
     @patch("apps.whatsapp.providers.qr_bridge.requests.request")
     def test_buttons_are_relayed_to_the_bridge(self, mock_request):

@@ -10,7 +10,7 @@ import logging
 
 from config.celery import app
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @app.task

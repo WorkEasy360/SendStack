@@ -1,0 +1,78 @@
+# Production overlay. Use with:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml <command>
+#
+# deploy.sh does exactly that, and nothing else should be used on the VM.
+#
+# WHY THIS IS A SEPARATE FILE AND NOT AN EDIT TO docker-compose.yml
+#
+# Two reasons, and the second is the important one.
+#
+# 1. docker-compose.yml is correct as it stands and is what a developer runs
+#    locally. TLS, a certbot container and a published :443 are deployment
+#    concerns, not application ones.
+#
+# 2. docker-compose.override.yml is picked up *automatically* by a bare
+#    `docker compose up`, and it forces DJANGO_SETTINGS_MODULE to
+#    config.settings.development -- its own header says to delete it before
+#    deploying for real. Relying on somebody remembering to delete a file is
+#    not a safeguard. Naming any file with -f suppresses the automatic
+#    override entirely, so the command above cannot pick up development
+#    settings even if the override file is still sitting there. The mechanism
+#    that turns TLS on is the same one that guarantees production settings.
+
+services:
+  nginx:
+    ports:
+      # Replaces the base file's single mapping. HTTP stays open because ACME
+      # http-01 validation and renewal both need it, and because the :80
+      # server redirects everything else to :443 anyway.
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      # Read by nginx/docker-entrypoint.sh to decide whether to install the
+      # TLS layout, and substituted into server-tls.conf's ssl_certificate
+      # paths and server_name. Unset means "serve plain HTTP", which is the
+      # correct behaviour before the first certificate is issued.
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - static_volume:/static:ro
+      - media_volume:/media:ro
+      # Read-only: nginx reads certificates, certbot writes them.
+      - certbot_conf:/etc/letsencrypt:ro
+      # Read-write is not needed by nginx -- it only serves what certbot put
+      # there -- but the volume must be the same one certbot writes into.
+      - certbot_www:/var/www/certbot:ro
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    # Renewal only. Issuance is a one-off manual step (docs/DEPLOY.md) because
+    # it is the step that can fail for reasons only a human can fix -- DNS not
+    # propagated, port 80 closed in the Oracle security list, a typo in the
+    # domain -- and a container that retries those in a loop burns through
+    # Let's Encrypt's rate limit (5 failed validations per account per
+    # hostname per hour) and locks you out of issuing the real one.
+    #
+    # `renew` is a no-op until a certificate is within 30 days of expiry, so
+    # running it twice a day costs nothing and means a renewal has ~60
+    # chances to succeed before anything expires. nginx picks up the new
+    # certificate on its own 12-hourly reload -- see nginx/docker-entrypoint.sh.
+    entrypoint: >
+      sh -c 'trap exit TERM;
+             while :; do
+               certbot renew --webroot -w /var/www/certbot --quiet;
+               sleep 12h & wait $${!};
+             done'
+    deploy:
+      resources:
+        limits:
+          memory: ${MEM_LIMIT_CERTBOT:-128m}
+
+volumes:
+  certbot_conf:
+  certbot_www:

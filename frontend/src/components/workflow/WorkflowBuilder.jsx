@@ -24,6 +24,7 @@ import {
     UserCheck,
 } from "lucide-react";
 import Button from "../ui/Button";
+import { useDarkMode } from "../../utils/theme";
 import { Field, Input, Select, Textarea } from "../ui/Field";
 import {
     OUTPUTS,
@@ -57,7 +58,7 @@ function WorkflowNode({ id, data, selected }) {
 
     return (
         <div
-            className={`w-[210px] rounded-xl border-2 bg-white shadow-card transition-shadow ${
+            className={`w-[210px] rounded-xl border-2 bg-surface shadow-card transition-shadow ${
                 selected ? "border-brand-500 shadow-lg" : "border-ink-200"
             }`}
         >
@@ -109,6 +110,7 @@ const nodeTypes = { workflow: WorkflowNode };
  * that is what makes a layout survive being saved and reopened.
  */
 function Canvas({ value, onChange, tags = [], agents = [], templates = [] }) {
+    const dark = useDarkMode();
     const initial = useMemo(() => toGraph(value), []); // eslint-disable-line react-hooks/exhaustive-deps
     const [nodes, setNodes] = useState(initial.nodes);
     const [edges, setEdges] = useState(initial.edges);
@@ -180,7 +182,7 @@ function Canvas({ value, onChange, tags = [], agents = [], templates = [] }) {
     const problems = validateGraph(fromGraph(nodes, edges));
 
     return (
-        <div className="border border-ink-200 rounded-card overflow-hidden bg-white">
+        <div className="border border-ink-200 rounded-card overflow-hidden bg-surface">
             <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-ink-200 bg-ink-50">
                 <span className="text-xs font-semibold text-ink-500 mr-1">Add:</span>
                 {PALETTE.map((type) => {
@@ -196,6 +198,7 @@ function Canvas({ value, onChange, tags = [], agents = [], templates = [] }) {
             <div className="flex flex-col lg:flex-row">
                 <div className="h-[440px] lg:h-[540px] flex-1 min-w-0">
                     <ReactFlow
+                        colorMode={dark ? "dark" : "light"}
                         nodes={nodes}
                         edges={edges}
                         nodeTypes={nodeTypes}
@@ -214,7 +217,7 @@ function Canvas({ value, onChange, tags = [], agents = [], templates = [] }) {
                         proOptions={{ hideAttribution: false }}
                         deleteKeyCode={null}
                     >
-                        <Background gap={16} size={1} color="#e5e7eb" />
+                        <Background gap={16} size={1} color={dark ? "#26324d" : "#e5e7eb"} />
                         <Controls showInteractive={false} />
                         {/* Only once the graph is big enough to get lost in.
                             On a six-node workflow it is a pale box covering
@@ -225,7 +228,7 @@ function Canvas({ value, onChange, tags = [], agents = [], templates = [] }) {
                     </ReactFlow>
                 </div>
 
-                <aside className="w-full lg:w-72 shrink-0 border-t lg:border-t-0 lg:border-l border-ink-200 p-4 bg-white lg:max-h-[540px] overflow-y-auto">
+                <aside className="w-full lg:w-72 shrink-0 border-t lg:border-t-0 lg:border-l border-ink-200 p-4 bg-surface lg:max-h-[540px] overflow-y-auto">
                     {selected ? (
                         <NodeInspector
                             node={selected}

@@ -17,7 +17,7 @@ from .models import Conversation, ConversationLabel
 from .serializers import ConversationLabelSerializer, ConversationNoteSerializer, ConversationSerializer, ReplySerializer
 from .services import InboxError
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def _notify_mentions(request, conversation, note):

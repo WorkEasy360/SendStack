@@ -19,8 +19,8 @@ import { timeAgo } from "./CrmBits";
 
 const TONE = {
     urgent: "border-red-200 bg-red-50/60 hover:border-red-300",
-    normal: "border-ink-200 bg-white hover:border-brand-300",
-    idle: "border-ink-200 bg-white opacity-60",
+    normal: "border-ink-200 bg-surface hover:border-brand-300",
+    idle: "border-ink-200 bg-surface opacity-60",
 };
 
 function Tile({ item }) {

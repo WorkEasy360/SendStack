@@ -28,7 +28,7 @@ from . import services
 from .models import CallSession, VoiceAgentConfig
 from .providers.registry import get_provider
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 def _authorised(session, request, kind: str) -> bool:

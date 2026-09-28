@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Lock, User } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useBranding } from "../../context/BrandingContext";
@@ -47,7 +47,7 @@ function Login() {
                     <p className="text-sm text-ink-500 m-0">Sign in to your workspace</p>
                 </div>
 
-                <div className="bg-white border border-ink-200 rounded-card shadow-raised p-6 sm:p-7">
+                <div className="bg-surface border border-ink-200 rounded-card shadow-raised p-6 sm:p-7">
                     <form onSubmit={handleLogin}>
                         <Alert>{error}</Alert>
 
@@ -92,11 +92,23 @@ function Login() {
                         <Button type="submit" size="lg" className="w-full mt-2" loading={loading}>
                             {loading ? "Signing in..." : "Sign In"}
                         </Button>
+
+                        <Link
+                            to="/forgot-password"
+                            className="mt-4 block text-center text-sm text-ink-500 hover:text-ink-700"
+                        >
+                            Forgot your password?
+                        </Link>
                     </form>
                 </div>
 
                 <p className="text-center text-xs text-ink-400 mt-6">
                     WhatsApp campaigns, automation and inbox in one workspace.
+                </p>
+                <p className="text-center text-xs text-ink-400 mt-2">
+                    <Link to="/terms" className="text-ink-400 hover:text-ink-600">Terms</Link>
+                    {" · "}
+                    <Link to="/privacy" className="text-ink-400 hover:text-ink-600">Privacy</Link>
                 </p>
             </div>
         </div>

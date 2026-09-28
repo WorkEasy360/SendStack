@@ -75,6 +75,13 @@ class Campaign(models.Model):
     # buttons existed looks like; see core.buttons for the item shape.
     buttons = models.JSONField(default=list, blank=True)
 
+    # A tappable menu, and a poll -- mutually exclusive with each other and
+    # with `buttons`. Only read when the campaign has no template; a campaign
+    # that selects one takes all of its content from the template, including
+    # these. See core.interactive.
+    list_content = models.JSONField(default=dict, blank=True)
+    poll_content = models.JSONField(default=dict, blank=True)
+
     # Defaults on, because a broadcast with no way out of it is the thing that
     # gets numbers reported, and a recipient who cannot find the exit uses the
     # "block" button instead. Off is a deliberate choice for the cases where it
@@ -113,6 +120,13 @@ class Campaign(models.Model):
     # account was available for them -- distinct from failed_count, which
     # means the provider was reached and refused the send.
     skipped_count = models.PositiveIntegerField(default=0)
+    # Recipients whose sending worker died inside the ambiguous provider
+    # window, so the outcome is genuinely unknown (Message.RECOVERY_REQUIRED).
+    # Counted separately and NOT as "failed": a failed message can be retried,
+    # an unknown one must not be blindly resent. A campaign can COMPLETE with
+    # a non-zero value here -- it just means "finished, N need a human or a
+    # reconciliation to settle". See apps/messaging/recovery.py.
+    recovery_required_count = models.PositiveIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -146,6 +160,8 @@ class Campaign(models.Model):
                 "filename": self.template.filename,
                 "variables": self.template.variables,
                 "buttons": self.template.buttons,
+                "list_content": self.template.list_content,
+                "poll_content": self.template.poll_content,
             }
         return {
             "message_type": self.message_type,
@@ -156,4 +172,19 @@ class Campaign(models.Model):
             "filename": self.filename,
             "variables": {},
             "buttons": self.buttons,
+            "list_content": self.list_content,
+            "poll_content": self.poll_content,
         }
+
+    def content_kind(self) -> str:
+        """
+        TEXT / BUTTON / LIST / POLL for whatever this campaign will actually
+        send -- the template's content when it has one, its own otherwise.
+
+        A method rather than the property the other two models carry, because
+        the answer depends on the template and resolving it can hit the
+        database.
+        """
+        from core.interactive import content_kind
+
+        return content_kind(self.effective_message())

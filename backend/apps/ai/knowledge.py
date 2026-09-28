@@ -1,27 +1,34 @@
 """
 Splitting documents up, and finding the pieces that answer a question.
 
-Retrieval here is lexical -- term overlap weighted by how rare each term is
-across the tenant's knowledge base -- not embeddings. That is a deliberate
-trade: it needs no vector database, no embedding calls to keep in step with
-edits, and no new dependency, and over the few dozen documents a business
-actually maintains it finds the right paragraph. `search` and `retrieve` are
-the only entry points, so swapping in embeddings later changes this file and
-nothing else.
+Retrieval starts lexical -- term overlap weighted by how rare each term is
+across the tenant's knowledge base -- and stays lexical unless a deployment
+turns embeddings on. That default is a deliberate trade: it needs no vector
+database, no embedding calls to keep in step with edits, and no new
+dependency, and over the few dozen documents a business actually maintains it
+finds the right paragraph.
 
-Two things this module owes the rest of the feature:
+Where `AI_EMBEDDINGS_ENABLED` is set and a tenant's chunks have been indexed,
+the lexical score is **blended** with vector similarity rather than replaced by
+it -- see `apps.ai.embeddings` for why both are needed. A tenant with no
+vectors, or an embedding endpoint that is down, silently gets the lexical
+result, which is the behaviour this module had before embeddings existed.
+
+Two things this module owes the rest of the feature, in both modes:
 
 * **A score, not just an ordering.** An agent has to be able to tell "this is
   the answer" from "this is the least irrelevant thing I have", because the
   second one must produce a fallback rather than a confident invention.
 * **Isolation on every query.** Every retrieval is filtered by tenant, and by
   knowledge base where one is named. There is no code path that reads a chunk
-  without both.
+  without both -- including the vector one.
 """
 
 import math
 import re
 from collections import Counter
+
+from . import embeddings
 
 # Split on blank lines first: a FAQ, a price list and a policy document are
 # all written in paragraphs, and a paragraph is very close to the unit that
@@ -131,6 +138,7 @@ def rebuild(document) -> int:
         )
         for index, piece in enumerate(pieces)
     ])
+    embeddings.schedule(document)
     return len(pieces)
 
 
@@ -150,6 +158,7 @@ def rebuild_from_sections(document, sections) -> int:
         ],
         batch_size=500,
     )
+    embeddings.schedule(document)
     return len(pieces)
 
 
@@ -220,30 +229,18 @@ def _band(relevance: float) -> str:
     return KnowledgeAnswer.Confidence.NONE
 
 
-def retrieve(tenant_id, query: str, *, knowledge_base_id=None, limit: int = 5) -> Retrieval:
+def _candidate_chunks(tenant_id, knowledge_base_id):
     """
-    The chunks most likely to answer `query`, with a relevance band.
+    Every chunk one question is allowed to see.
 
-    Scored with plain TF-IDF over the tenant's own knowledge base: a term that
-    appears in every document says nothing about which one to read, while a
-    term appearing in two says a great deal. Chunks matching none of the
-    query's terms are not returned at all -- padding the model's context with
-    unrelated text is how an agent ends up confidently answering from the
-    wrong page.
-
-    The normalisation is deliberately conservative: the best chunk's score is
-    divided by the score it *would* have if it contained every distinctive
-    term in the question. A question whose terms appear nowhere lands at 0,
-    and a question answered squarely by one paragraph lands near 1.
+    The two filters are applied here and nowhere else, so there is a single
+    place to read to be sure a question cannot reach another tenant's
+    documents or a knowledge base it was not pointed at. Isolation is not a
+    feature of the caller.
     """
     from .models import KnowledgeChunk
 
-    terms = set(tokenize(query))
-    if not terms:
-        return Retrieval([], 0.0, _band(0.0))
-
     chunks = KnowledgeChunk.objects.filter(
-        # Both filters, always. Isolation is not a feature of the caller.
         tenant_id=tenant_id,
         document__is_active=True,
         document__status="READY",
@@ -251,27 +248,35 @@ def retrieve(tenant_id, query: str, *, knowledge_base_id=None, limit: int = 5) -
     if knowledge_base_id is not None:
         chunks = chunks.filter(knowledge_base_id=knowledge_base_id, knowledge_base__is_active=True)
 
-    chunks = list(
+    return list(
         chunks.select_related("document")
         .only(
             "id", "content", "page", "heading", "document__id", "document__title",
             "document__source_url", "document__original_filename",
         )[:MAX_SCANNED_CHUNKS]
     )
-    if not chunks:
-        return Retrieval([], 0.0, _band(0.0))
 
+
+def _lexical(chunks, terms) -> tuple:
+    """
+    ``({chunk_id: score}, perfect)`` -- raw TF-IDF, and the yardstick.
+
+    A term that appears in every document says nothing about which one to
+    read, while a term appearing in two says a great deal. `perfect` is the
+    score a chunk *would* get if it contained every distinctive term in the
+    question once: dividing by it is what turns a raw total, which varies with
+    query length and library size, into something a fixed threshold can be
+    compared against.
+    """
     tokenized = [(chunk, Counter(tokenize(chunk.content))) for chunk in chunks]
     document_frequency = Counter()
     for _, counts in tokenized:
         document_frequency.update(counts.keys() & terms)
 
     total = len(tokenized)
-    # The score a chunk would get if it contained every query term once --
-    # the yardstick the best hit is measured against.
     perfect = sum(math.log(1 + total / (1 + document_frequency[term])) for term in terms) or 1.0
 
-    scored = []
+    scores = {}
     for chunk, counts in tokenized:
         score = 0.0
         for term in terms:
@@ -283,15 +288,88 @@ def retrieve(tenant_id, query: str, *, knowledge_base_id=None, limit: int = 5) -
             idf = math.log(1 + total / (1 + document_frequency[term]))
             score += (1 + math.log(occurrences)) * idf
         if score > 0:
-            scored.append((score, chunk))
+            scores[chunk.pk] = score
+    return scores, perfect
+
+
+def retrieve(tenant_id, query: str, *, knowledge_base_id=None, limit: int = 5, config=None) -> Retrieval:
+    """
+    The chunks most likely to answer `query`, with a relevance band.
+
+    Two passes over one candidate set, both filtered by tenant and knowledge
+    base:
+
+    * **Lexical**, always. Chunks matching none of the query's terms score
+      zero -- padding the model's context with unrelated text is how an agent
+      ends up confidently answering from the wrong page.
+    * **Semantic**, only where embeddings are switched on, the tenant has a
+      usable key, and their chunks have actually been indexed. This pass
+      *does* reach chunks with no term in common with the question, which is
+      the entire reason it exists.
+
+    With no semantic scores -- the feature off, nothing indexed yet, the
+    endpoint down -- the result is exactly what the lexical pass produced, so
+    this degrades to the behaviour it had before embeddings existed rather
+    than to silence.
+
+    Where both passes ran, a chunk's score is the weighted sum of its
+    normalised lexical score and its similarity (`AI_EMBEDDING_WEIGHT`), which
+    is what makes a chunk have to do well on both to win.
+    """
+    terms = set(tokenize(query))
+    query_vector = embeddings.embed_query(query, config or _config_for(tenant_id)) if embeddings.is_enabled() else []
+
+    # A question of nothing but stop words has no lexical signal at all; with
+    # no vector to fall back on there is nothing here to answer it with.
+    if not terms and not query_vector:
+        return Retrieval([], 0.0, _band(0.0))
+
+    chunks = _candidate_chunks(tenant_id, knowledge_base_id)
+    if not chunks:
+        return Retrieval([], 0.0, _band(0.0))
+
+    lexical, perfect = _lexical(chunks, terms) if terms else ({}, 1.0)
+    semantic = embeddings.similarities(
+        tenant_id, query_vector, knowledge_base_id=knowledge_base_id, chunk_ids=[chunk.pk for chunk in chunks],
+    ) if query_vector else {}
+
+    if not semantic:
+        # The path this module has always taken. Kept whole rather than
+        # expressed as "hybrid with weight 0" so that a deployment which never
+        # turns embeddings on runs the same arithmetic it always did.
+        scored = [(score, chunk) for chunk in chunks if (score := lexical.get(chunk.pk, 0.0)) > 0]
+        if not scored:
+            return Retrieval([], 0.0, _band(0.0))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].pk))
+        top = scored[:limit]
+        relevance = min(top[0][0] / perfect, 1.0)
+        return Retrieval([Hit(chunk, score) for score, chunk in top], relevance, _band(relevance))
+
+    vector_weight = embeddings.weight()
+    scored = []
+    for chunk in chunks:
+        lexical_score = min(lexical.get(chunk.pk, 0.0) / perfect, 1.0)
+        similarity = semantic.get(chunk.pk, 0.0)
+        blended = (1 - vector_weight) * lexical_score + vector_weight * similarity
+        if blended > 0:
+            scored.append((blended, chunk))
 
     if not scored:
         return Retrieval([], 0.0, _band(0.0))
 
     scored.sort(key=lambda pair: (-pair[0], pair[1].pk))
     top = scored[:limit]
-    relevance = min(top[0][0] / perfect, 1.0)
+    # Already 0-1: the blend is a weighted sum of two normalised scores, so
+    # the best chunk's score *is* the relevance, with no second normalisation.
+    relevance = min(top[0][0], 1.0)
     return Retrieval([Hit(chunk, score) for score, chunk in top], relevance, _band(relevance))
+
+
+def _config_for(tenant_id):
+    """The agent config whose key embeddings should be made with. Never writes."""
+    from .models import AIAgentConfig
+
+    return AIAgentConfig.for_tenant(tenant_id)
 
 
 def search(tenant_id, query: str, limit: int = 5, knowledge_base_id=None) -> list:

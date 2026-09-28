@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Bot, Gauge, KeyRound, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Activity, BookOpen, Bot, Gauge, KeyRound, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
+import {
+    AI_PROVIDERS,
+    BASE_URL_PLACEHOLDER,
+    FREEFORM_PROVIDERS,
+    KEY_HINT,
+    KEY_PLACEHOLDER,
+    MODEL_SUGGESTIONS,
+    baseUrlProblem,
+    modelForProvider,
+    modelNameProblem,
+    modelOptions,
+} from "../../constants/aiProviders";
 import Alert from "../../components/ui/Alert";
 import Badge from "../../components/ui/Badge";
 import Button from "../../components/ui/Button";
@@ -9,6 +21,8 @@ import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import EmptyState from "../../components/ui/EmptyState";
 import Modal from "../../components/ui/Modal";
 import PageHeader from "../../components/ui/PageHeader";
+import { FeatureLocked } from "../../components/billing/FeatureLock";
+import { useEntitlements } from "../../context/EntitlementsContext";
 import Spinner from "../../components/ui/Spinner";
 import Tabs from "../../components/ui/Tabs";
 import { Field, Input, Select, Textarea, Toggle } from "../../components/ui/Field";
@@ -18,13 +32,19 @@ import { useToast } from "../../components/ui/Toast";
  * The AI agent: what it is allowed to say, what it may say it from, and what
  * it has cost.
  *
- * Split into three tabs because they are read at different times. The agent's
+ * Split into tabs because they are read at different times. Status answers "is
+ * it working?" and so comes first and is where somebody lands; the agent's
  * behaviour is set up once and rarely revisited; the knowledge base is edited
  * whenever the business changes; usage is checked when somebody asks what the
  * bill is or why the agent went quiet.
  */
 
 const TABS = [
+    // Status first: the question people arrive with is "is it working?", and
+    // it is the one question the settings form cannot answer -- a perfectly
+    // filled-in form still answers nobody if every document failed to parse or
+    // the number is disconnected.
+    { id: "status", label: "Status", icon: Activity },
     { id: "agent", label: "Agent", icon: Bot },
     { id: "knowledge", label: "Knowledge base", icon: BookOpen },
     { id: "usage", label: "Usage", icon: Gauge },
@@ -47,7 +67,26 @@ const OUTCOME_TONE = {
 };
 
 export default function AIAgent() {
-    const [tab, setTab] = useState("agent");
+    const [tab, setTab] = useState("status");
+    const { hasFeature } = useEntitlements();
+
+    // Shown, not hidden. Somebody who cannot see that the agent exists will
+    // never ask for it -- and the backend refuses every AI call regardless of
+    // what this renders, so hiding it would buy no safety either.
+    if (!hasFeature("ai_agent")) {
+        return (
+            <div>
+                <PageHeader
+                    title="AI agent"
+                    description="Answers customers from the knowledge you give it, and hands over to a person when it cannot."
+                />
+                <FeatureLocked
+                    title="AI Agent"
+                    description="Let the assistant answer customers from your own documents, draft replies for your team, and summarise long threads."
+                />
+            </div>
+        );
+    }
 
     return (
         <div>
@@ -58,9 +97,213 @@ export default function AIAgent() {
 
             <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
+            {tab === "status" && <StatusTab onOpenTab={setTab} />}
             {tab === "agent" && <AgentTab />}
             {tab === "knowledge" && <KnowledgeTab />}
             {tab === "usage" && <UsageTab />}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_TONE = {
+    CONNECTED: "green",
+    CONNECTING: "amber",
+    QR_READY: "amber",
+    DISCONNECTED: "gray",
+    DISCONNECTING: "gray",
+    EXPIRED: "gray",
+    ERROR: "red",
+};
+
+/** One labelled number with an optional note under it. */
+function Stat({ label, value, note, tone }) {
+    return (
+        <div>
+            <p className="text-xs font-semibold text-ink-500 m-0">{label}</p>
+            <p className={`text-2xl font-bold mt-1 mb-0 tabular-nums ${tone === "red" ? "text-red-600" : "text-ink-900"}`}>
+                {value}
+            </p>
+            {note && <p className="text-xs text-ink-400 mt-1 mb-0">{note}</p>}
+        </div>
+    );
+}
+
+function StatusTab({ onOpenTab }) {
+    const [data, setData] = useState(null);
+    const [error, setError] = useState("");
+
+    useEffect(() => {
+        api.get("/ai/status/")
+            .then((response) => setData(response.data))
+            .catch((err) => setError(apiErrorMessage(err, "Unable to load the agent's status.")));
+    }, []);
+
+    if (error) return <Alert>{error}</Alert>;
+    if (!data) return <Spinner />;
+
+    const { agent, knowledge, whatsapp, automation, usage } = data;
+    // A number nobody can be answered on, or a knowledge base nothing can be
+    // answered from, is as broken as a missing key — so the headline verdict
+    // is the conjunction, not just the agent's own switch.
+    const answering = agent.is_ready && whatsapp.connected > 0 && knowledge.ready > 0;
+
+    return (
+        <div className="space-y-6">
+            <Alert tone={answering ? "success" : agent.is_enabled ? "warning" : "info"}>
+                {answering ? (
+                    <>
+                        The assistant is answering customers on {whatsapp.connected}{" "}
+                        {whatsapp.connected === 1 ? "number" : "numbers"}, using <strong>{agent.model}</strong>{" "}
+                        and {knowledge.ready} {knowledge.ready === 1 ? "document" : "documents"}.
+                    </>
+                ) : (
+                    <>
+                        {agent.problem || "The assistant is not answering anyone yet."}
+                        {agent.is_ready && whatsapp.connected === 0 && " No WhatsApp number is connected."}
+                        {agent.is_ready && whatsapp.connected > 0 && knowledge.ready === 0 &&
+                            " There are no readable documents to answer from."}
+                    </>
+                )}
+            </Alert>
+
+            <Card>
+                <CardHeader
+                    title="AI agent"
+                    description="What the agent will use for the next customer who messages."
+                    className="mb-4"
+                />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <Stat
+                        label="Status"
+                        value={agent.status === "CONNECTED" ? "Connected" : agent.status === "OFF" ? "Off" : "Error"}
+                        tone={agent.status === "ERROR" ? "red" : undefined}
+                    />
+                    <Stat label="Provider" value={agent.provider} />
+                    <Stat label="Model" value={agent.model || "—"} />
+                    <Stat
+                        label="API key"
+                        value={agent.api_key_source === "tenant" ? "Yours" : agent.api_key_source === "environment" ? "Server" : "None"}
+                        note={agent.api_key_source === "environment" ? "From the server's environment" : ""}
+                        tone={agent.api_key_source === "none" ? "red" : undefined}
+                    />
+                </div>
+            </Card>
+
+            <Card>
+                <CardHeader
+                    title="Knowledge base"
+                    description={
+                        knowledge.retrieval_mode === "hybrid"
+                            ? `Retrieval is hybrid — keywords blended with meaning (${knowledge.embeddings.model}).`
+                            : "Retrieval is by keyword. Turn on AI_EMBEDDINGS_ENABLED to blend in semantic search."
+                    }
+                    className="mb-4"
+                />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <Stat label="Ready" value={knowledge.ready} note={`${knowledge.chunks} searchable pieces`} />
+                    <Stat label="Processing" value={knowledge.pending + knowledge.processing} />
+                    <Stat label="Failed" value={knowledge.failed} tone={knowledge.failed ? "red" : undefined} />
+                    <Stat
+                        label="Embedded"
+                        value={knowledge.embeddings.enabled ? knowledge.embeddings.embedded : "Off"}
+                    />
+                </div>
+
+                {knowledge.failed_documents.length > 0 && (
+                    <ul className="list-none p-0 mt-4 mb-0 space-y-1">
+                        {knowledge.failed_documents.map((document) => (
+                            <li key={document.id} className="text-xs text-red-600">
+                                <strong>{document.original_filename || document.title}</strong> — {document.error}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+
+                <Button variant="secondary" className="mt-4" onClick={() => onOpenTab("knowledge")}>
+                    Manage documents
+                </Button>
+            </Card>
+
+            <Card padded={false}>
+                <div className="p-5">
+                    <CardHeader
+                        title="WhatsApp numbers"
+                        description="Every connected number is answered by the agent. Connecting a new one needs no setup here."
+                        className="mb-0"
+                    />
+                </div>
+                {whatsapp.accounts.length === 0 ? (
+                    <p className="px-5 pb-5 mt-0 text-sm text-ink-500">No WhatsApp numbers are connected yet.</p>
+                ) : (
+                    <ul className="list-none p-0 m-0 divide-y divide-ink-100 border-t border-ink-100">
+                        {whatsapp.accounts.map((account) => (
+                            <li key={account.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3">
+                                <span className="text-sm font-medium text-ink-900">{account.name}</span>
+                                <span className="text-xs text-ink-500 tabular-nums">{account.phone_number || "—"}</span>
+                                <Badge tone={ACCOUNT_TONE[account.status] || "gray"}>{account.status}</Badge>
+                                <span className="text-xs text-ink-400">{account.connection_method}</span>
+                                {account.status === "CONNECTED" && (
+                                    <span className="text-xs text-green-700 ml-auto">AI enabled</span>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </Card>
+
+            <Card>
+                <CardHeader
+                    title="Automation"
+                    description="Rules run before the agent does. The first thing that answers a message ends it, so a message a rule claimed never reaches the agent."
+                    className="mb-4"
+                />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <Stat label="Active rules" value={automation.rules} />
+                    <Stat label="Workflows" value={automation.workflows} />
+                    <Stat label="Follow-ups" value={automation.follow_ups} />
+                    <Stat label="Agent runs" value="Last" note="After every rule above" />
+                </div>
+            </Card>
+
+            <Card>
+                <CardHeader
+                    title="Recent activity"
+                    description="What the agent has actually done."
+                    className="mb-4"
+                />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <Stat label="Calls (24h)" value={usage.calls_last_24h} note={`${usage.calls} all time`} />
+                    <Stat label="Input tokens" value={usage.input_tokens.toLocaleString()} />
+                    <Stat label="Output tokens" value={usage.output_tokens.toLocaleString()} />
+                    <Stat
+                        label="Errors"
+                        value={usage.by_outcome?.ERROR || 0}
+                        tone={usage.by_outcome?.ERROR ? "red" : undefined}
+                    />
+                </div>
+
+                {usage.last_answer && (
+                    <div className="mt-4 pt-4 border-t border-ink-100">
+                        <p className="text-xs font-semibold text-ink-500 m-0">Last customer answer</p>
+                        <p className="text-sm text-ink-700 mt-1 mb-0">“{usage.last_answer.question}”</p>
+                        <p className="text-sm text-ink-900 mt-1 mb-0">{usage.last_answer.answer || "— handed over —"}</p>
+                    </div>
+                )}
+
+                {usage.recent_errors.length > 0 && (
+                    <ul className="list-none p-0 mt-4 mb-0 space-y-1">
+                        {usage.recent_errors.map((entry, index) => (
+                            <li key={index} className="text-xs text-red-600">
+                                {new Date(entry.created_at).toLocaleString()} — {entry.error}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </Card>
         </div>
     );
 }
@@ -89,6 +332,16 @@ function AgentTab() {
 
     const update = (patch) => setConfig((current) => ({ ...current, ...patch }));
 
+    // Changing provider takes the model with it. The vendors' model names are
+    // not interchangeable, so leaving the old one behind would put the form in
+    // a state that cannot be saved and looks like it should be. For a provider
+    // the server can name a model for, the box is left blank instead — see
+    // modelForProvider.
+    const switchProvider = (provider) => update({ provider, model: modelForProvider(provider) });
+
+    const modelProblem = config ? modelNameProblem(config.provider, config.model) : "";
+    const urlProblem = config ? baseUrlProblem(config.provider, config.base_url) : "";
+
     const save = async () => {
         setSaving(true);
         setError("");
@@ -96,13 +349,16 @@ function AgentTab() {
             const response = await api.patch("/ai/agent/", {
                 is_enabled: config.is_enabled,
                 display_name: config.display_name,
+                provider: config.provider,
                 model: config.model,
+                base_url: config.base_url,
                 business_context: config.business_context,
                 temperature: config.temperature,
                 max_output_tokens: config.max_output_tokens,
                 history_messages: config.history_messages,
                 knowledge_chunks: config.knowledge_chunks,
                 answer_from_knowledge_only: config.answer_from_knowledge_only,
+                knowledge_only_message: config.knowledge_only_message,
                 reply_when_assigned: config.reply_when_assigned,
                 max_replies_per_conversation: config.max_replies_per_conversation,
                 handoff_enabled: config.handoff_enabled,
@@ -194,20 +450,77 @@ function AgentTab() {
                     />
                 </Field>
 
-                <Field label="Model">
-                    <Select value={config.model} onChange={(event) => update({ model: event.target.value })}>
-                        <option value="claude-opus-5">Claude Opus 5 — most capable</option>
-                        <option value="claude-sonnet-5">Claude Sonnet 5 — balanced (recommended)</option>
-                        <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 — fastest and cheapest</option>
-                    </Select>
-                </Field>
+                <div className="grid sm:grid-cols-2 gap-x-4">
+                    <Field
+                        label="Provider"
+                        hint="Who bills you and whose key this is."
+                    >
+                        <Select
+                            value={config.provider}
+                            onChange={(event) => switchProvider(event.target.value)}
+                        >
+                            {AI_PROVIDERS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                        </Select>
+                    </Field>
+
+                    <Field label="Model" error={modelProblem}>
+                        {FREEFORM_PROVIDERS.includes(config.provider) ? (
+                            <>
+                                {/* Free text, not a list: neither OpenRouter nor a custom
+                                    endpoint's own models are a list this codebase can keep
+                                    current, and the API takes any name. */}
+                                <Input
+                                    list="ai-agent-models"
+                                    value={config.model}
+                                    onChange={(event) => update({ model: event.target.value })}
+                                    placeholder={
+                                        config.provider === "CUSTOM" ? "gpt-4o, llama3.3, deepseek-chat…" : "anthropic/claude-sonnet-4.5"
+                                    }
+                                    invalid={Boolean(modelProblem)}
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                />
+                                <datalist id="ai-agent-models">
+                                    {(MODEL_SUGGESTIONS[config.provider] || []).map((option) => (
+                                        <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                </datalist>
+                            </>
+                        ) : (
+                            <Select value={config.model} onChange={(event) => update({ model: event.target.value })}>
+                                {modelOptions(config.provider, config.model).map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                            </Select>
+                        )}
+                    </Field>
+                </div>
+
+                {config.provider === "CUSTOM" && (
+                    <Field
+                        label="Base URL"
+                        error={urlProblem}
+                        hint="The OpenAI-compatible endpoint to send requests to — everything up to (not including) /chat/completions."
+                    >
+                        <Input
+                            value={config.base_url || ""}
+                            onChange={(event) => update({ base_url: event.target.value })}
+                            placeholder={BASE_URL_PLACEHOLDER}
+                            invalid={Boolean(urlProblem)}
+                            autoComplete="off"
+                            spellCheck={false}
+                        />
+                    </Field>
+                )}
 
                 <Field
                     label="API key"
                     hint={
                         config.has_api_key
                             ? "A key is stored. Type a new one to replace it — it is never shown again."
-                            : "Your own Anthropic key. Leave blank to use the one this deployment was set up with."
+                            : `${KEY_HINT[config.provider] || ""} Leave blank to use the one this deployment was set up with.`
                     }
                 >
                     <div className="flex gap-2">
@@ -215,7 +528,11 @@ function AgentTab() {
                             type="password"
                             value={apiKey}
                             onChange={(event) => setApiKey(event.target.value)}
-                            placeholder={config.has_api_key ? "••••••••••••••••" : "sk-ant-…"}
+                            placeholder={
+                                config.has_api_key
+                                    ? "••••••••••••••••"
+                                    : KEY_PLACEHOLDER[config.provider] || ""
+                            }
                             autoComplete="off"
                         />
                         {config.has_api_key && (
@@ -298,12 +615,34 @@ function AgentTab() {
 
                 <div className="mb-4">
                     <Toggle
-                        checked={config.answer_from_knowledge_only}
+                        checked={config.knowledge_only_enforced || config.answer_from_knowledge_only}
                         onChange={(event) => update({ answer_from_knowledge_only: event.target.checked })}
+                        disabled={config.knowledge_only_enforced}
                         label="Answer only from the knowledge base"
-                        description="Off, the agent may answer from general knowledge — and may invent a price or a policy in your voice."
+                        description={
+                            config.knowledge_only_enforced
+                                ? "Switched on for this whole installation and cannot be turned off here. Questions your documents do not cover are refused rather than guessed at."
+                                : "Off, the agent may answer from general knowledge — and may invent a price or a policy in your voice."
+                        }
                     />
                 </div>
+
+                {/* Only worth showing when it is the sentence customers will
+                    actually receive -- outside knowledge-only mode the
+                    fallback above is what they get. */}
+                {(config.knowledge_only_enforced || config.answer_from_knowledge_only) && (
+                    <Field
+                        label="What to say when the answer isn't in the knowledge base"
+                        hint="Keep it plain. A refusal that hedges reads as a soft yes, and invites the next question rather than answering this one."
+                    >
+                        <Input
+                            maxLength={500}
+                            value={config.knowledge_only_message ?? ""}
+                            onChange={(event) => update({ knowledge_only_message: event.target.value })}
+                            placeholder="I couldn't find this information in the Knowledge Base."
+                        />
+                    </Field>
+                )}
 
                 <div className="mb-4">
                     <Toggle

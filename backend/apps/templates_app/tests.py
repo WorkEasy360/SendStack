@@ -241,8 +241,8 @@ class TemplateBulkActionTests(TestCase):
 class TemplateButtonsApiTests(TestCase):
     """
     Buttons are validated on save, not at send time: WhatsApp's limits (three
-    reply buttons, 20-character labels, no mixing reply and link buttons) are
-    what make an interactive message deliverable at all.
+    reply buttons, one link, one call button, 20-character labels) are what
+    make an interactive message deliverable at all.
     """
 
     def setUp(self):
@@ -287,13 +287,27 @@ class TemplateButtonsApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("3 reply buttons", str(response.json()))
 
-    def test_reply_and_link_buttons_cannot_be_mixed(self):
+    def test_reply_and_link_buttons_save_together(self):
+        """
+        The kinds combine on the way in even though only one of them can be
+        tappable on the way out -- see core.buttons. Refusing the save would
+        only push the author into pasting the link into the body by hand.
+        """
         response = self._post(
             buttons=[{"title": "Yes"}, {"type": "URL", "title": "Shop", "url": "https://example.com"}]
         )
 
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual([button["type"] for button in response.json()["buttons"]], ["REPLY", "URL"])
+
+    def test_a_second_link_button_is_still_refused(self):
+        response = self._post(buttons=[
+            {"type": "URL", "title": "Shop", "url": "https://example.com"},
+            {"type": "URL", "title": "Blog", "url": "https://example.com/blog"},
+        ])
+
         self.assertEqual(response.status_code, 400)
-        self.assertIn("not both", str(response.json()))
+        self.assertIn("one link button", str(response.json()))
 
     def test_a_label_longer_than_whatsapp_allows_is_rejected(self):
         response = self._post(buttons=[{"title": "This label is far too long for WhatsApp"}])

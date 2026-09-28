@@ -77,7 +77,7 @@ function Steps({ current, methodLabel }) {
                                 done
                                     ? "bg-brand-600 text-white"
                                     : active
-                                      ? "bg-ink-900 text-white"
+                                      ? "bg-ink-900 text-ink-50"
                                       : "bg-ink-200 text-ink-500"
                             }`}
                         >
@@ -140,6 +140,17 @@ export default function WhatsAppConnectionWizard({ onClose, onConnected, existin
             // pairing session and disrupt an active device link for no
             // reason.
             setStep("success");
+            return;
+        }
+
+        if (existingAccount.status === "QR_READY") {
+            // A QR session may already be waiting when the devices page is
+            // opened (for example after an operator refreshes a corrupted
+            // linked-device session). Reuse that session instead of calling
+            // /connect/ and creating a second socket/QR for the same number.
+            setStep("qr");
+            void loadQr(existingAccount.id);
+            startPolling(existingAccount.id);
             return;
         }
 
@@ -412,7 +423,7 @@ export default function WhatsAppConnectionWizard({ onClose, onConnected, existin
                                     className={`flex items-start gap-3 text-left rounded-xl border px-4 py-3.5 cursor-pointer transition-all ${
                                         isSelected
                                             ? "border-brand-500 bg-brand-50/60 ring-4 ring-brand-500/10"
-                                            : "border-ink-200 bg-white hover:border-ink-300 hover:bg-ink-50"
+                                            : "border-ink-200 bg-surface hover:border-ink-300 hover:bg-ink-50"
                                     }`}
                                 >
                                     <span
@@ -444,7 +455,7 @@ export default function WhatsAppConnectionWizard({ onClose, onConnected, existin
 
             {step === "qr" && (
                 <div className="text-center">
-                    <div className="mx-auto w-56 h-56 p-2 rounded-xl border border-ink-200 bg-white flex items-center justify-center">
+                    <div className="mx-auto w-56 h-56 p-2 rounded-xl border border-ink-200 bg-surface flex items-center justify-center">
                         {qrData ? (
                             <img src={qrData} alt="WhatsApp QR code" className="w-full h-full rounded-lg" />
                         ) : (

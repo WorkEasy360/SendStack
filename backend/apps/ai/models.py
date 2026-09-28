@@ -1,10 +1,10 @@
-import os
 import uuid
 
 from django.conf import settings
 from django.db import models
 
 from apps.whatsapp.connections.session import decrypt_secret, encrypt_secret
+from core.uploads import safe_extension
 
 
 class AIAgentConfig(models.Model):
@@ -20,7 +20,18 @@ class AIAgentConfig(models.Model):
     """
 
     class Provider(models.TextChoices):
+        # One entry per client module in `apps.ai.providers.registry`. Anthropic
+        # is billed direct and takes an sk-ant- key; OpenAI is billed direct
+        # and takes an sk- key, and is the one provider whose key, model and
+        # endpoint may also come from the environment (OPENAI_API_KEY /
+        # OPENAI_MODEL / OPENAI_BASE_URL); OpenRouter is one key in front of
+        # many vendors' models and takes an sk-or- key, with model names
+        # written as `vendor/model`; Custom is any OpenAI-compatible endpoint
+        # the tenant names themselves via `base_url` below.
         ANTHROPIC = "ANTHROPIC", "Anthropic (Claude)"
+        OPENAI = "OPENAI", "OpenAI"
+        OPENROUTER = "OPENROUTER", "OpenRouter"
+        CUSTOM = "CUSTOM", "Custom (OpenAI-compatible)"
 
     class ReplyScope(models.TextChoices):
         """
@@ -71,6 +82,9 @@ class AIAgentConfig(models.Model):
     display_name = models.CharField(max_length=80, default="Assistant")
     provider = models.CharField(max_length=20, choices=Provider.choices, default=Provider.ANTHROPIC)
     model = models.CharField(max_length=100, default="claude-sonnet-5")
+    # Only read when provider is Custom -- the OpenAI-compatible endpoint's
+    # base URL, e.g. https://api.groq.com/openai/v1 or http://localhost:11434/v1.
+    base_url = models.URLField(max_length=300, blank=True, default="")
 
     # The tenant's own key, encrypted at rest with the same Fernet key as the
     # WhatsApp provider credentials. Blank means "use the deployment's key",
@@ -94,6 +108,16 @@ class AIAgentConfig(models.Model):
         default=True,
         help_text="Refuse rather than guess when the answer is not in the knowledge base.",
     )
+    # What a customer is told when the documents do not cover their question
+    # and AI_KNOWLEDGE_ONLY is on. Editable because the right wording is the
+    # tenant's own -- but the default is deliberately blunt: a refusal that
+    # hedges ("I'm not sure, but it may be...") is the sentence a model
+    # completes with an invention.
+    knowledge_only_message = models.CharField(
+        max_length=500,
+        default="I couldn't find this information in the Knowledge Base.",
+        help_text="Sent when knowledge-base-only answering is on and nothing relevant was found.",
+    )
     reply_when_assigned = models.BooleanField(
         default=False,
         help_text="Also answer conversations an agent has already taken. Off means the agent stays out of their way.",
@@ -106,6 +130,29 @@ class AIAgentConfig(models.Model):
     handoff_message = models.TextField(
         blank=True,
         default="Let me get a colleague to help with that -- someone will be with you shortly.",
+    )
+
+    # What the agent may *do*, as opposed to say. Three switches rather than
+    # one because they are three different sizes of mistake: a read tool that
+    # goes wrong wastes a request, a write tool that goes wrong edits a
+    # customer's record, and a send tool that goes wrong puts a message on
+    # somebody's phone. Each is off until somebody turns it on, and `granted`
+    # in apps.ai.tools is the single place that reads them.
+    tools_enabled = models.BooleanField(
+        default=False,
+        help_text="Let the agent look things up and act, rather than only answering from what it was given.",
+    )
+    allow_write_tools = models.BooleanField(
+        default=False,
+        help_text="Let the agent update the customer's record -- save their details, add a label.",
+    )
+    allow_send_tools = models.BooleanField(
+        default=False,
+        help_text="Let the agent send an extra WhatsApp message on top of its reply.",
+    )
+    max_tool_rounds = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Model round-trips one reply may take while using tools. 0 for the platform default.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -166,8 +213,11 @@ class KnowledgeBase(models.Model):
 def knowledge_document_upload_path(instance, filename):
     # A UUID stem so two uploads of "pricing.pdf" cannot collide; the name the
     # user recognises is kept separately in `original_filename`.
-    extension = os.path.splitext(filename)[1].lower()[:16]
-    return f"knowledge/tenant_{instance.tenant_id}/{uuid.uuid4().hex}{extension}"
+    #
+    # The extension goes through core.uploads.safe_extension rather than a bare
+    # splitext, because this builds a path under MEDIA_ROOT and the extension
+    # is the one part of it an uploader still influences.
+    return f"knowledge/tenant_{instance.tenant_id}/{uuid.uuid4().hex}{safe_extension(filename)}"
 
 
 class KnowledgeDocument(models.Model):
@@ -269,6 +319,12 @@ class KnowledgeChunk(models.Model):
     page = models.PositiveIntegerField(null=True, blank=True)
     heading = models.CharField(max_length=200, blank=True)
 
+    # When this piece entered the knowledge base. Chunks are replaced wholesale
+    # on every edit, so this is the age of the *current* text rather than of
+    # the document -- which is the useful one when the question is "was the
+    # customer quoted the old price or the new one?".
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+
     class Meta:
         ordering = ["document_id", "ordinal"]
         indexes = [
@@ -290,6 +346,53 @@ class KnowledgeChunk(models.Model):
         return source
 
 
+class KnowledgeEmbedding(models.Model):
+    """
+    One chunk's meaning, as a vector, for retrieval that does not depend on
+    shared words.
+
+    Why this is a table and not a column on KnowledgeChunk: a chunk exists the
+    moment a document is saved, while its vector arrives later from a worker
+    and may never arrive at all -- the endpoint can be down, the key can be
+    wrong, the feature can be off. Keeping them apart means "chunked" and
+    "embedded" are separately observable, and a missing vector degrades
+    retrieval to lexical rather than making the chunk unreadable.
+
+    `vector` is float32 packed little-endian and **normalised to unit length
+    at write time**, which turns cosine similarity into a dot product and
+    takes the square roots out of the hot loop. `model` is stored alongside
+    because vectors from two different embedding models are not comparable at
+    all: changing AI_EMBEDDING_MODEL has to invalidate what is here rather
+    than silently mixing two coordinate systems and scoring nonsense.
+
+    `tenant` and `knowledge_base` are denormalised from the chunk for the same
+    reason KnowledgeChunk denormalises them from the document: this is filtered
+    on for every question, and isolation that depends on a join is isolation
+    somebody can forget to write.
+    """
+
+    chunk = models.OneToOneField(KnowledgeChunk, on_delete=models.CASCADE, related_name="embedding")
+    tenant = models.ForeignKey("tenants.Tenant", on_delete=models.CASCADE, related_name="knowledge_embeddings")
+    knowledge_base = models.ForeignKey(
+        KnowledgeBase, on_delete=models.CASCADE, null=True, blank=True, related_name="embeddings",
+    )
+
+    model = models.CharField(max_length=100)
+    dims = models.PositiveIntegerField(default=0)
+    vector = models.BinaryField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["tenant", "model"]),
+            models.Index(fields=["knowledge_base", "model"]),
+        ]
+
+    def __str__(self):
+        return f"embedding for chunk {self.chunk_id} ({self.model})"
+
+
 class AIConversationState(models.Model):
     """
     What the agent has already done in one conversation.
@@ -308,6 +411,65 @@ class AIConversationState(models.Model):
 
     def __str__(self):
         return f"AI state for conversation {self.conversation_id}"
+
+
+class AIToolCall(models.Model):
+    """
+    One thing the agent did, as opposed to said.
+
+    Kept apart from `AIUsageLog` for the same reason `KnowledgeAnswer` is:
+    that table counts tokens and answers a billing question, this one records
+    actions and answers "what did the assistant do to this customer's record,
+    and on whose number". A table trying to be both would be indexed for
+    neither, and the retention arguments are different too -- a token count
+    stops mattering after the invoice, while an action taken on a customer's
+    behalf is the thing somebody asks about three months later.
+
+    Every owning identifier is stored, including the ones that are derivable
+    by joining, because the question this table answers is usually asked from
+    the wrong end: "which number sent that?" arrives with a phone in a
+    screenshot, not a conversation id.
+    """
+
+    tenant = models.ForeignKey("tenants.Tenant", on_delete=models.CASCADE, related_name="ai_tool_calls")
+    conversation = models.ForeignKey(
+        "inbox.Conversation", on_delete=models.SET_NULL, null=True, blank=True, related_name="ai_tool_calls",
+    )
+    contact = models.ForeignKey(
+        "contacts.Contact", on_delete=models.SET_NULL, null=True, blank=True, related_name="ai_tool_calls",
+    )
+    whatsapp_account = models.ForeignKey(
+        "whatsapp.WhatsAppAccount", on_delete=models.SET_NULL, null=True, blank=True, related_name="ai_tool_calls",
+    )
+    #: The provider-side device this ran against -- a QR bridge session or a
+    #: Cloud API phone_number_id. Stored as text rather than a foreign key
+    #: because it is whatever the provider said at the time, and a number
+    #: re-paired next week must not rewrite what last week's row means.
+    device_id = models.CharField(max_length=255, blank=True)
+
+    name = models.CharField(max_length=100)
+    #: What the model asked for, with anything secret-shaped taken out. Values
+    #: are stringified and truncated on the way in -- see `tools._redact`.
+    arguments = models.JSONField(default=dict, blank=True)
+    #: What the model was told. The customer-safe sentence, not the exception.
+    result = models.TextField(blank=True)
+    is_error = models.BooleanField(default=False)
+    #: The internal reason, for whoever is debugging. Never sent to the model
+    #: and therefore never reachable by the customer.
+    detail = models.CharField(max_length=500, blank=True)
+    duration_ms = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant", "-created_at"]),
+            models.Index(fields=["conversation", "-created_at"]),
+            models.Index(fields=["tenant", "name"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name} on conversation {self.conversation_id}"
 
 
 class KnowledgeAnswer(models.Model):

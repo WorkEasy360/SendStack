@@ -1,5 +1,9 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
+
+from core.uploads import safe_extension
 
 
 class ContactGroup(models.Model):
@@ -57,8 +61,65 @@ class Contact(models.Model):
     company = models.CharField(max_length=150, blank=True)
     country = models.CharField(max_length=2, blank=True)
     custom_fields = models.JSONField(default=dict, blank=True)
+
+    # --- Consent -----------------------------------------------------------
+    #
+    # Two fields, answering two different questions, and conflating them is the
+    # mistake this pair exists to prevent.
+    #
+    # `subscribed` is the **opt-out**: has this person told us to stop? It
+    # starts True because somebody who has never said anything has not said
+    # stop, and it is the flag the send gate has always honoured.
+    #
+    # `marketing_consent` is the **opt-in**: did they ever say yes, and can we
+    # show where that yes came from? It starts UNKNOWN, and UNKNOWN is the
+    # honest answer for every contact that already exists and for every row of
+    # every CSV anybody has ever imported -- a phone number in a spreadsheet is
+    # not evidence of consent, and defaulting these to GRANTED would be the
+    # platform inventing consent on a customer's behalf.
+    #
+    # Precedence, enforced in one place (compliance.services.may_receive_marketing):
+    #
+    #     explicit opt-out  >  marketing consent  >  campaign eligibility
+    #
+    # An opt-out is authoritative and outranks any later "consent" from an
+    # import, a CRM sync or an API caller.
     subscribed = models.BooleanField(default=True)
     unsubscribed_at = models.DateTimeField(null=True, blank=True)
+
+    class MarketingConsent(models.TextChoices):
+        UNKNOWN = "UNKNOWN", "Not recorded"
+        GRANTED = "GRANTED", "Consent given"
+        DENIED = "DENIED", "Consent refused"
+
+    class ConsentSource(models.TextChoices):
+        MANUAL = "MANUAL", "Entered by a team member"
+        WEBSITE = "WEBSITE", "Website"
+        FORM = "FORM", "Opt-in form"
+        CRM = "CRM", "CRM or other system"
+        API = "API", "API"
+        CSV = "CSV", "File import"
+        CUSTOMER_PROVIDED = "CUSTOMER_PROVIDED", "Provided by the customer"
+        INBOUND = "INBOUND", "They messaged us first"
+        OTHER = "OTHER", "Other"
+
+    marketing_consent = models.CharField(
+        max_length=10, choices=MarketingConsent.choices, default=MarketingConsent.UNKNOWN,
+        help_text="Whether this contact has agreed to receive marketing. Never inferred from having their number.",
+    )
+    consent_source = models.CharField(
+        max_length=20, choices=ConsentSource.choices, blank=True,
+        help_text="Where the consent came from. The evidence, not the claim.",
+    )
+    consent_at = models.DateTimeField(null=True, blank=True, help_text="When consent was given or refused.")
+    # Free text and short on purpose: the identifier of the form, campaign or
+    # list the consent came from. Not a place for raw personal data -- storing
+    # a copy of somebody's submission "as evidence" would collect more than the
+    # purpose needs. The append-only ConsentEvent log carries the rest.
+    consent_reference = models.CharField(
+        max_length=120, blank=True,
+        help_text="Which form, campaign or list this consent came from, e.g. 'newsletter-signup-2026'.",
+    )
 
     # --- CRM ---------------------------------------------------------------
     # Whose customer this is. Separate from `created_by`, which records who
@@ -89,6 +150,22 @@ class Contact(models.Model):
     # touches, is in leadgen.LeadEvent.
     source = models.CharField(max_length=30, blank=True)
     source_detail = models.JSONField(default=dict, blank=True)
+
+    # --- WhatsApp registration -------------------------------------------
+    # Whether this number is on WhatsApp at all, as last answered by WhatsApp
+    # itself through the number filter (apps.leadtools). UNKNOWN until
+    # somebody runs it. Stamped with a time rather than kept as a bare flag,
+    # because a number that was registered last quarter may not be today and
+    # a report that cannot say when it looked is not worth trusting.
+    class WhatsAppStatus(models.TextChoices):
+        UNKNOWN = "UNKNOWN", "Not checked"
+        ON_WHATSAPP = "ON_WHATSAPP", "On WhatsApp"
+        NOT_ON_WHATSAPP = "NOT_ON_WHATSAPP", "Not on WhatsApp"
+
+    whatsapp_status = models.CharField(
+        max_length=16, choices=WhatsAppStatus.choices, default=WhatsAppStatus.UNKNOWN,
+    )
+    whatsapp_checked_at = models.DateTimeField(null=True, blank=True)
     groups = models.ManyToManyField(ContactGroup, blank=True, related_name="contacts")
     tags = models.ManyToManyField(ContactTag, blank=True, related_name="contacts")
     last_message_at = models.DateTimeField(null=True, blank=True)
@@ -99,6 +176,14 @@ class Contact(models.Model):
         constraints = [models.UniqueConstraint(fields=["tenant", "phone"], name="unique_contact_phone_per_tenant")]
         indexes = [
             models.Index(fields=["tenant", "subscribed"]),
+            # "Who on this account may be marketed to" -- asked by the campaign
+            # audience builder and by every consent report. Without it, a
+            # tenant with consent enforcement on scans its whole contact table
+            # to build an audience.
+            models.Index(fields=["tenant", "marketing_consent"]),
+            # "Who on this list is actually reachable" -- the filter the
+            # number-filter results screen and the contact list both offer.
+            models.Index(fields=["tenant", "whatsapp_status"]),
             models.Index(fields=["tenant", "phone"]),
             # The CRM list and every smart segment filter on one of these
             # three columns within a tenant; without them each is a scan of
@@ -125,7 +210,11 @@ class Contact(models.Model):
 
 
 def contact_import_upload_path(instance, filename):
-    return f"contact_imports/tenant_{instance.tenant_id}/{filename}"
+    # A UUID stem rather than the name that arrived: this file lands under
+    # MEDIA_ROOT, which nginx serves, so the uploader must have no say over
+    # the path it is served from. safe_extension() is what guarantees the one
+    # remaining piece -- the extension -- cannot become a path segment either.
+    return f"contact_imports/tenant_{instance.tenant_id}/{uuid.uuid4().hex}{safe_extension(filename)}"
 
 
 class ContactImport(models.Model):
@@ -141,6 +230,24 @@ class ContactImport(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     group_ids = models.JSONField(default=list, blank=True)
     tag_ids = models.JSONField(default=list, blank=True)
+
+    # What the uploader is asserting about consent for the rows in this file,
+    # and where it came from. Blank means "not asserting anything", which is
+    # the default and leaves every imported contact at UNKNOWN.
+    #
+    # The alternative -- inferring consent from the act of uploading -- is the
+    # single most common way a platform ends up sending marketing to people who
+    # never agreed to it, and it is what the audit asked to be made impossible.
+    # An importer that silently marks 10,000 strangers as opted-in is not a
+    # convenience, it is a compliance incident with a progress bar.
+    consent_source = models.CharField(
+        max_length=20, blank=True,
+        help_text="Where consent for these contacts came from. Blank means consent is not being asserted.",
+    )
+    consent_reference = models.CharField(
+        max_length=120, blank=True,
+        help_text="Which form, list or campaign this file's consent came from.",
+    )
     # Which CSV header the importer decided was which field, worked out from
     # the file itself (see mapping.detect_columns). Stored so an import that
     # went wrong can be explained afterwards -- "it put your order numbers in

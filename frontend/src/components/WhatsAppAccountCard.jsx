@@ -41,7 +41,7 @@ function WhatsAppAccountCard({
 
     return (
         <div
-            className={`bg-white border rounded-card shadow-card p-5 flex flex-col ${
+            className={`bg-surface border rounded-card shadow-card p-5 flex flex-col ${
                 selected ? "border-brand-400 ring-1 ring-brand-500/20" : "border-ink-200"
             }`}
         >
@@ -103,9 +103,14 @@ function WhatsAppAccountCard({
                         Reconnect
                     </Button>
                 )}
-                {isInProgress && (
+                {account.status === "QR_READY" && (
+                    <Button size="sm" onClick={() => onReconnect(account)} disabled={busy}>
+                        Open QR
+                    </Button>
+                )}
+                {isInProgress && account.status !== "QR_READY" && (
                     <Button size="sm" loading disabled>
-                        {account.status === "QR_READY" ? "Waiting for scan" : "Connecting"}
+                        Connecting
                     </Button>
                 )}
                 {isConnected && (

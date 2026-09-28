@@ -3,3 +3,9 @@
 pytest==9.1.1
 pytest-django==4.14.0
 factory-boy==3.3.3
+
+# Without this, Django's parallel test runner cannot pickle a failure's
+# traceback back to the parent process, so the FIRST failing test crashes
+# the whole run and every test after it silently never reports. A red run
+# is then indistinguishable from a broken one.
+tblib==3.2.2

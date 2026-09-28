@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from apps.whatsapp.models import WhatsAppAccount
 from core.button_fields import ButtonsField, validate_button_body
+from core.interactive_fields import ListContentField, PollContentField, validate_interactive_content
 from core.media_fields import MediaItemsField, apply_media_items
 
 from .assignment import resolve_delay_bounds
@@ -22,6 +23,8 @@ class CampaignSerializer(serializers.ModelSerializer):
     # never set them will really do.
     media_items = MediaItemsField(required=False)
     buttons = ButtonsField(required=False)
+    list_content = ListContentField(required=False)
+    poll_content = PollContentField(required=False)
     effective_min_delay_seconds = serializers.SerializerMethodField()
     effective_max_delay_seconds = serializers.SerializerMethodField()
 
@@ -32,16 +35,19 @@ class CampaignSerializer(serializers.ModelSerializer):
             "account_assignment_mode", "min_delay_seconds", "max_delay_seconds",
             "effective_min_delay_seconds", "effective_max_delay_seconds",
             "message_type", "message_body", "media_url", "media_items", "caption", "filename", "buttons",
+            "list_content", "poll_content",
             "append_opt_out",
             "track_links",
             "audience_type", "audience_group", "audience_tag", "audience_segment", "audience_contact_ids",
             "scheduled_at", "status",
             "total_recipients", "sent_count", "delivered_count", "read_count", "failed_count", "skipped_count",
+            "recovery_required_count",
             "created_at", "updated_at", "started_at", "completed_at",
         )
         read_only_fields = (
             "id", "status", "total_recipients", "sent_count", "delivered_count", "read_count",
-            "failed_count", "skipped_count", "effective_min_delay_seconds", "effective_max_delay_seconds",
+            "failed_count", "skipped_count", "recovery_required_count",
+            "effective_min_delay_seconds", "effective_max_delay_seconds",
             "created_at", "updated_at", "started_at", "completed_at",
         )
 
@@ -107,13 +113,19 @@ class CampaignSerializer(serializers.ModelSerializer):
         template = attrs.get("template", getattr(self.instance, "template", None))
         message_body = attrs.get("message_body", getattr(self.instance, "message_body", ""))
         media_url = attrs.get("media_url", getattr(self.instance, "media_url", ""))
-        if not template and not message_body and not media_url:
-            raise serializers.ValidationError("Select a template or provide message_body/media_url.")
+        poll_content = attrs.get("poll_content", getattr(self.instance, "poll_content", {}))
+        # A poll is content in its own right: its question is the message,
+        # so a poll campaign legitimately has no body and no attachment.
+        if not template and not message_body and not media_url and not poll_content:
+            raise serializers.ValidationError(
+                "Select a template, or provide message_body, media_url or a poll."
+            )
 
         # Only the campaign's own buttons are checked here: a template brings
         # its own, already validated when the template was saved.
         validate_button_body(attrs.get("buttons", getattr(self.instance, "buttons", [])), message_body,
                              field="message_body")
+        validate_interactive_content(attrs, self.instance, body_field="message_body")
 
         self._validate_delays(attrs)
 

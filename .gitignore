@@ -5,9 +5,22 @@ __pycache__/
 .venv/
 venv/
 
-# Environment secrets
-.env
-backend/.env
+# Environment secrets.
+#
+# Deliberately every .env*, not the three specific paths this used to name: a
+# populated backup (backend/.env.env.bak-20260827-184120) sat untracked-by-luck
+# for weeks because ".env" does not match ".env.env.bak-...". The example files
+# are the only ones that come back, and they hold no values.
+.env*
+!.env.example
+# Anything a hand-rolled backup or an editor leaves behind next to a secret.
+*.bak
+*.bak-*
+*.orig
+*.pem
+*.key
+!.gitignore
+
 backend/db.sqlite3
 backend/media/
 backend/staticfiles/
@@ -31,3 +44,23 @@ qr-bridge/.env
 
 # Logs
 *.log
+
+# Database backups. A dump is the whole customer database in one file --
+# every phone number, every message, every encrypted provider credential.
+# It must never reach a Git history (from which it cannot be removed) or a
+# Docker build context (from which it is baked into a shipped layer).
+backups/
+*.dump
+*.dump.gpg
+*.sql.gz
+# Plain SQL dumps too. Nothing in this repository is a tracked .sql
+# file, so this costs nothing; if one is ever needed, force-add it.
+*.sql
+*.pgdump
+
+# Local development override. It forces config.settings.development, which
+# disables the production guards -- committing it would let a clone onto the
+# production VM silently run with DEBUG behaviour and permissive CORS.
+# deploy.sh refuses to run while this file is present; keeping it untracked
+# means it can never arrive there in the first place.
+docker-compose.override.yml

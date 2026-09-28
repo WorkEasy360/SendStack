@@ -41,6 +41,18 @@ export interface SessionEntry {
     // timer holding the next attempt.
     reconnectAttempts?: number;
     reconnectTimer?: NodeJS.Timeout;
+
+    // Inbound accounting for this session, kept because "connected" and
+    // "delivering" are not the same thing and only these tell them apart. A
+    // session whose Signal state has gone bad reports CONNECTED for as long as
+    // the socket holds, receives everything sent to it, and forwards none of
+    // it -- see DropReason in providers/baileysProvider.ts. In memory only:
+    // this is a live health signal, not a record, and a restart is exactly
+    // when it should start counting again.
+    inboundForwarded?: number;
+    inboundDropped?: number;
+    inboundUndecryptable?: number;
+    inboundLastForwardedAt?: number;
 }
 
 /** In-memory session registry, keyed by our own session_id (not Baileys' internal state). */
@@ -48,7 +60,22 @@ export class SessionStore {
     private sessions = new Map<string, SessionEntry>();
 
     constructor(private readonly dataDir: string) {
-        fs.mkdirSync(dataDir, { recursive: true });
+        // 0700. This directory holds Baileys' Signal identity keys and device
+        // credentials for every connected WhatsApp number -- whoever can read
+        // it can impersonate those numbers. The container already runs as the
+        // unprivileged `app` user and the volume is not published anywhere, so
+        // this is the third lock rather than the first; it costs nothing and it
+        // is what stops a future sidecar or a bind-mounted host directory from
+        // quietly making the files world-readable. See SECURITY.md.
+        fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+        try {
+            // mkdirSync's mode is ignored when the directory already exists,
+            // which is every restart after the first.
+            fs.chmodSync(dataDir, 0o700);
+        } catch {
+            // A volume driver that does not support chmod (some Windows and
+            // NFS mounts) is not a reason to refuse to start.
+        }
     }
 
     authDirFor(sessionId: string): string {

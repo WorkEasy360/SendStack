@@ -123,8 +123,9 @@ function WhatsAppAccounts() {
         const result = await runBulk("/whatsapp/accounts/bulk/", { action, ids: selection.selectedIds });
         if (result.succeeded > 0) toast.success(result.message);
         if (result.failed > 0 || !result.ok) {
-            // Devices with send history are refused by the API and named here,
-            // so it is obvious which of the ticked devices survived.
+            // Send history no longer refuses a delete, so a failure here is a
+            // real one (provider error, permissions); naming the device makes
+            // it obvious which of the ticked ones survived.
             setError(describeBulkFailures(result, (id) => accounts.find((a) => a.id === id)?.name));
         }
         selection.clear();
@@ -244,7 +245,7 @@ function WhatsAppAccounts() {
                 }
                 actions={
                     <>
-                        <div className="hidden sm:inline-flex rounded-lg border border-ink-200 bg-white p-0.5 shadow-card">
+                        <div className="hidden sm:inline-flex rounded-lg border border-ink-200 bg-surface p-0.5 shadow-card">
                             {[
                                 { id: "grid", icon: LayoutGrid, label: "Grid view" },
                                 { id: "table", icon: Rows3, label: "Table view" },
@@ -256,7 +257,7 @@ function WhatsAppAccounts() {
                                     aria-label={label}
                                     title={label}
                                     className={`w-8 h-8 inline-flex items-center justify-center rounded-md cursor-pointer border-none transition-colors ${
-                                        view === id ? "bg-ink-900 text-white" : "bg-transparent text-ink-500 hover:text-ink-900"
+                                        view === id ? "bg-ink-900 text-ink-50" : "bg-transparent text-ink-500 hover:text-ink-900"
                                     }`}
                                 >
                                     <Icon size={15} />
@@ -372,7 +373,7 @@ function WhatsAppAccounts() {
                         pendingBulk === "delete"
                             ? `Delete the ${selection.selectedCount} selected device${
                                   selection.selectedCount === 1 ? "" : "s"
-                              }? Any device with campaigns or messages behind it is refused and left connected, so its history stays in your reports.`
+                              }? They are disconnected first, so anything still sending from them stops. Past sends stay in your reports. This cannot be undone.`
                             : `Disconnect the ${selection.selectedCount} selected device${
                                   selection.selectedCount === 1 ? "" : "s"
                               }? They stay in the list and can be reconnected, but nothing sends from them until you do.`
@@ -388,6 +389,10 @@ function WhatsAppAccounts() {
                 />
             )}
 
+            {/* A device that has sent anything is never refused, only warned
+                about: the delete goes through, its connection is dropped and
+                it leaves this list, while the campaigns and messages behind
+                it keep their history for reporting. */}
             {pendingDelete && (
                 <ConfirmDialog
                     title="Delete device"
@@ -395,10 +400,10 @@ function WhatsAppAccounts() {
                         pendingDelete.active_campaign_count > 0
                             ? `Delete "${pendingDelete.name}"? ${pendingDelete.active_campaign_count} campaign${
                                   pendingDelete.active_campaign_count === 1 ? " is" : "s are"
-                              } still sending from it. Cancel those first — deleting is blocked while a campaign references this device.`
+                              } still sending from it — they stop on this device the moment it goes. Past sends stay in your reports. This cannot be undone.`
                             : ["CONNECTING", "QR_READY"].includes(pendingDelete.status)
                             ? `Delete "${pendingDelete.name}"? The pending pairing is cancelled and this cannot be undone.`
-                            : `Delete "${pendingDelete.name}"? Its connection is dropped and this cannot be undone.`
+                            : `Delete "${pendingDelete.name}"? Its connection is dropped and it leaves this list. Any messages sent from it stay in your reports. This cannot be undone.`
                     }
                     confirmLabel="Delete device"
                     onConfirm={() => deleteAccount(pendingDelete.id)}

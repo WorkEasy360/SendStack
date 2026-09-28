@@ -180,6 +180,7 @@ function BaseDetail({ base, onChanged }) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [uploading, setUploading] = useState(false);
+    const [progress, setProgress] = useState([]);
     const [showText, setShowText] = useState(false);
     const [textForm, setTextForm] = useState({ title: "", content: "" });
     const [saving, setSaving] = useState(false);
@@ -219,34 +220,58 @@ function BaseDetail({ base, onChanged }) {
     }, [documents, load]);
 
     const upload = async (files) => {
-        if (!files?.length) return;
+        const chosen = Array.from(files || []);
+        if (!chosen.length) return;
         setUploading(true);
         setError("");
-        let failures = 0;
-        for (const file of Array.from(files)) {
+
+        // Each file is tracked by name so the list below can say which one is
+        // on the wire and which one was refused -- "1 of 4 failed" with no
+        // name is a message that cannot be acted on.
+        setProgress(chosen.map((file) => ({ name: file.name, percent: 0, state: "waiting" })));
+
+        const failed = [];
+        for (const [index, file] of chosen.entries()) {
             const data = new FormData();
             data.append("file", file);
             data.append("knowledge_base", base.id);
+            const mark = (patch) =>
+                setProgress((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+            mark({ state: "uploading" });
             try {
+                // No content type here: `api` strips it for FormData so the
+                // browser sets multipart/form-data with its boundary.
                 await api.post("/ai/knowledge/upload/", data, {
-                    headers: { "Content-Type": "multipart/form-data" },
+                    onUploadProgress: (event) => {
+                        if (!event.total) return;
+                        mark({ percent: Math.round((event.loaded * 100) / event.total) });
+                    },
                 });
+                mark({ percent: 100, state: "done" });
             } catch (err) {
-                failures += 1;
-                setError(apiErrorMessage(err, `${file.name} could not be uploaded.`));
+                const reason = apiErrorMessage(err, "could not be uploaded.");
+                failed.push(`${file.name}: ${reason}`);
+                mark({ state: "failed", reason });
             }
         }
-        if (failures < files.length) {
+
+        const uploaded = chosen.length - failed.length;
+        if (uploaded > 0) {
             toast.success(
-                files.length - failures === 1
+                uploaded === 1
                     ? "Uploaded. We're reading it now."
-                    : `${files.length - failures} files uploaded. We're reading them now.`,
+                    : `${uploaded} files uploaded. We're reading them now.`,
             );
         }
+        if (failed.length) setError(failed.join(" · "));
+
         setUploading(false);
         if (fileInput.current) fileInput.current.value = "";
         await load();
         onChanged?.();
+        // Successful rows are now represented by the document list itself, so
+        // only the failures are worth keeping on screen.
+        setProgress((rows) => rows.filter((row) => row.state === "failed"));
     };
 
     const saveText = async (event) => {
@@ -416,12 +441,46 @@ function BaseDetail({ base, onChanged }) {
                 ref={fileInput}
                 type="file"
                 multiple
-                accept=".pdf,.docx,.txt,.md,.csv,.xlsx"
+                accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.json"
                 className="hidden"
                 onChange={(event) => upload(event.target.files)}
             />
 
             <Alert>{error}</Alert>
+
+            {/* Uploading is the one step the document list cannot show, because
+                until the file has landed there is no row for it. */}
+            {progress.length > 0 && (
+                <Card className="mb-4">
+                    <ul className="list-none p-0 m-0 space-y-3">
+                        {progress.map((row) => (
+                            <li key={row.name}>
+                                <div className="flex items-center justify-between gap-3">
+                                    <span className="text-sm text-ink-800 truncate min-w-0">{row.name}</span>
+                                    <span className="text-xs text-ink-500 shrink-0 tabular-nums">
+                                        {row.state === "failed"
+                                            ? "Failed"
+                                            : row.state === "done"
+                                              ? "Uploaded"
+                                              : row.state === "uploading"
+                                                ? `${row.percent}%`
+                                                : "Waiting"}
+                                    </span>
+                                </div>
+                                {row.state !== "failed" && (
+                                    <div className="h-1.5 rounded-full bg-ink-100 mt-1.5 overflow-hidden">
+                                        <div
+                                            className="h-full bg-brand-500 transition-[width] duration-200"
+                                            style={{ width: `${row.percent}%` }}
+                                        />
+                                    </div>
+                                )}
+                                {row.reason && <p className="text-xs text-red-600 mt-1 mb-0">{row.reason}</p>}
+                            </li>
+                        ))}
+                    </ul>
+                </Card>
+            )}
 
             {working > 0 && (
                 <Alert tone="info" title={`Reading ${working} document${working === 1 ? "" : "s"}`}>
@@ -443,7 +502,7 @@ function BaseDetail({ base, onChanged }) {
                                 <EmptyState
                                     icon={FileText}
                                     title="Nothing in here yet"
-                                    description="Upload your price list, FAQ, policies or product catalogue. PDF, Word, text, CSV and Excel all work — we read them and pull out the text."
+                                    description="Upload your price list, FAQ, policies or product catalogue. PDF, Word, text, CSV, Excel and JSON all work — we read them and pull out the text."
                                     action={
                                         <Button icon={Upload} onClick={() => fileInput.current?.click()}>
                                             Upload your first document

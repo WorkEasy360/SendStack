@@ -26,6 +26,8 @@ const FEATURES = [
     { key: "workflows", label: "Workflows", hint: "The drag-and-drop automation builder." },
     { key: "click_tracking", label: "Click tracking", hint: "Short links and per-recipient attribution." },
     { key: "api_access", label: "API access", hint: "Programmatic access to their data." },
+    { key: "number_filter", label: "Number filter", hint: "Check which numbers are on WhatsApp through a linked number." },
+    { key: "group_grabber", label: "Group grabber", hint: "Import the members of WhatsApp groups a linked number is in." },
 ];
 
 const LIMIT_FIELDS = [

@@ -7,11 +7,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from core.bulk import BulkActionMixin
+from core.uploads import UploadRejected, validate_upload
 
-from .models import MediaAsset, classify
+from .models import MediaAsset
 from .serializers import MediaAssetSerializer
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # nginx is configured with `client_max_body_size 20M`, so anything larger is
 # rejected by the proxy before Django sees it -- refuse it here with a readable
@@ -78,18 +79,33 @@ class MediaAssetViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        assets = [
-            MediaAsset.objects.create(
-                tenant=request.user.tenant,
-                uploaded_by=request.user,
-                file=upload,
-                original_filename=(upload.name or "")[:255],
-                content_type=(getattr(upload, "content_type", "") or "")[:150],
-                size_bytes=upload.size or 0,
-                kind=classify(upload.name, getattr(upload, "content_type", "") or ""),
+        # Validate everything before writing anything, for the same reason the
+        # size check above is all-or-nothing: half an upload landing in the
+        # picker while the rest was refused is harder to act on than being
+        # told which files to drop. What comes back is derived from the bytes
+        # -- the browser's filename and Content-Type decide nothing.
+        try:
+            checked = [validate_upload(upload) for upload in uploads]
+        except UploadRejected as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        assets = []
+        for upload, (_extension, content_type, kind, stored_name, display_name) in zip(uploads, checked):
+            # The name the storage backend sees is ours, so nothing an uploader
+            # writes reaches the path. `original_filename` keeps the name they
+            # recognise, for the download label WhatsApp shows.
+            upload.name = stored_name
+            assets.append(
+                MediaAsset.objects.create(
+                    tenant=request.user.tenant,
+                    uploaded_by=request.user,
+                    file=upload,
+                    original_filename=display_name,
+                    content_type=content_type,
+                    size_bytes=upload.size or 0,
+                    kind=kind,
+                )
             )
-            for upload in uploads
-        ]
         logger.info("Tenant %s uploaded %s media asset(s).", request.user.tenant_id, len(assets))
         serializer = self.get_serializer(assets, many=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

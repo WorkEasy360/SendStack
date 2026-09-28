@@ -21,14 +21,14 @@ from django.conf import settings
 from django.db.models import F
 from django.utils import timezone
 
-from apps.ai.providers.anthropic import AIProviderError
+from apps.ai.providers.base import AIProviderError
 
 from . import agent, tools
 from .models import CallSession, CallTurn, VoiceAgentConfig
 from .providers.base import Hangup, Listen, Pause, Speak, Transfer, VoiceProviderError
 from .providers.registry import get_provider
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # Said when the model could not be reached at all. Deliberately a request to
 # repeat rather than an apology for a technical fault: it keeps the call alive

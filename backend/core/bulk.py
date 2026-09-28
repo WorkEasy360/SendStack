@@ -20,7 +20,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.response import Response
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # A safety rail, not a UI limit: the frontend selects at most a page at a time.
 BULK_MAX_IDS = 500

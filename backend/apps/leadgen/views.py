@@ -10,11 +10,13 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from core.urls_safety import normalize_redirect_url
+
 from . import services
 from .models import ClickToChatLink, LeadEvent
 from .serializers import ClickToChatLinkSerializer, LeadEventSerializer
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @require_GET
@@ -32,7 +34,11 @@ def open_chat(request, code):
     if link is None:
         raise Http404("Unknown link.")
 
-    destination = services.whatsapp_url(link)
+    # whatsapp_url builds a wa.me link out of the account's own number, so this
+    # should always pass. It is checked anyway because this endpoint is a public
+    # redirect: the one class of bug that turns it into an open redirect is a
+    # destination that stopped being what the builder intended.
+    destination = normalize_redirect_url(services.whatsapp_url(link))
     if not destination:
         return HttpResponse(
             "This chat link is not ready yet. Please try again shortly.", status=503, content_type="text/plain",
@@ -78,25 +84,25 @@ def widget_script(request, code):
     return response
 
 
-_WIDGET_TEMPLATE = """/* MultiSender click-to-chat widget */
+_WIDGET_TEMPLATE = """/* SendStack click-to-chat widget */
 (function () {
   var config = __CONFIG__;
-  if (document.getElementById("multisender-chat-widget")) return;
+  if (document.getElementById("sendstack-chat-widget")) return;
 
   var style = document.createElement("style");
   style.textContent =
-    "#multisender-chat-widget{position:fixed;right:20px;bottom:20px;z-index:2147483000;" +
+    "#sendstack-chat-widget{position:fixed;right:20px;bottom:20px;z-index:2147483000;" +
     "display:flex;align-items:center;gap:10px;padding:12px 18px;border-radius:999px;" +
     "background:#25D366;color:#fff;font:600 15px/1 system-ui,-apple-system,Segoe UI,sans-serif;" +
     "text-decoration:none;box-shadow:0 8px 24px rgba(0,0,0,.18);transition:transform .15s ease}" +
-    "#multisender-chat-widget:hover{transform:translateY(-2px)}" +
-    "#multisender-chat-widget svg{width:22px;height:22px;fill:currentColor}" +
-    "@media (max-width:480px){#multisender-chat-widget span{display:none}" +
-    "#multisender-chat-widget{padding:14px;border-radius:50%}}";
+    "#sendstack-chat-widget:hover{transform:translateY(-2px)}" +
+    "#sendstack-chat-widget svg{width:22px;height:22px;fill:currentColor}" +
+    "@media (max-width:480px){#sendstack-chat-widget span{display:none}" +
+    "#sendstack-chat-widget{padding:14px;border-radius:50%}}";
   document.head.appendChild(style);
 
   var anchor = document.createElement("a");
-  anchor.id = "multisender-chat-widget";
+  anchor.id = "sendstack-chat-widget";
   anchor.href = config.url;
   anchor.target = "_blank";
   anchor.rel = "noopener";

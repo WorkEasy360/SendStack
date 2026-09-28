@@ -43,6 +43,59 @@ class QuotaTests(TestCase):
         self.assertEqual(reason, "")
         self.assertIsNone(services.quota_state(self.tenant.pk)["plan"])
 
+    def test_the_column_name_and_the_metric_name_both_work(self):
+        """`max_contacts` and `contacts` are the same ceiling asked two ways."""
+        plan = make_plan(max_contacts=1)
+        Subscription.objects.create(tenant=self.tenant, plan=plan)
+
+        with patch.object(services, "usage", return_value={"contacts": 1}):
+            by_column, _ = services.check_quota(self.tenant.pk, "max_contacts")
+            by_metric, _ = services.check_quota(self.tenant.pk, "contacts")
+
+        self.assertFalse(by_column)
+        self.assertFalse(by_metric)
+
+    def test_a_renewal_gives_the_period_a_real_end_date(self):
+        """`renew()` used to clear the only date the period had."""
+        plan = make_plan()
+        subscription = Subscription.objects.create(tenant=self.tenant, plan=plan)
+
+        subscription.renew()
+
+        self.assertIsNotNone(subscription.current_period_end)
+        self.assertGreater(subscription.current_period_end, subscription.current_period_start)
+
+    def test_the_usage_window_rolls_without_anybody_renewing(self):
+        """
+        Nothing in this product renews on a schedule, so the month has to move
+        by itself -- otherwise a customer's first month is their only one.
+        """
+        plan = make_plan(max_messages_per_month=10)
+        subscription = Subscription.objects.create(
+            tenant=self.tenant, plan=plan,
+            current_period_start=timezone.now() - timezone.timedelta(days=95),
+        )
+
+        start, end = subscription.current_period()
+
+        self.assertLessEqual(start, timezone.now())
+        self.assertGreater(end, timezone.now())
+
+    def test_a_cancelled_period_does_not_roll(self):
+        """Rolling a cancelled subscription's window would be renewing it for free."""
+        plan = make_plan()
+        ended = timezone.now() - timezone.timedelta(days=2)
+        subscription = Subscription.objects.create(
+            tenant=self.tenant, plan=plan, status=Subscription.Status.CANCELLED,
+            current_period_start=timezone.now() - timezone.timedelta(days=32),
+            current_period_end=ended,
+        )
+
+        _, end = subscription.current_period()
+
+        self.assertEqual(end, ended)
+        self.assertEqual(subscription.access_state(), Subscription.EXPIRED)
+
     def test_a_limit_that_is_not_reached_allows_the_work(self):
         plan = make_plan(max_messages_per_month=10)
         Subscription.objects.create(tenant=self.tenant, plan=plan)
@@ -62,9 +115,24 @@ class QuotaTests(TestCase):
         self.assertFalse(allowed)
         self.assertIn("Starter", reason)
 
-    def test_a_cancelled_subscription_stops_the_work(self):
+    def test_a_cancellation_keeps_working_until_the_period_ends(self):
+        """They paid for the month; cancelling does not take the rest of it away."""
         plan = make_plan(max_messages_per_month=0)
-        Subscription.objects.create(tenant=self.tenant, plan=plan, status=Subscription.Status.CANCELLED)
+        Subscription.objects.create(
+            tenant=self.tenant, plan=plan, status=Subscription.Status.CANCELLED,
+            current_period_end=timezone.now() + timezone.timedelta(days=5),
+        )
+
+        allowed, _ = services.check_quota(self.tenant.pk, "messages_per_month")
+        self.assertTrue(allowed)
+
+    def test_a_cancelled_subscription_stops_once_the_period_has_ended(self):
+        plan = make_plan(max_messages_per_month=0)
+        Subscription.objects.create(
+            tenant=self.tenant, plan=plan, status=Subscription.Status.CANCELLED,
+            current_period_start=timezone.now() - timezone.timedelta(days=60),
+            current_period_end=timezone.now() - timezone.timedelta(days=1),
+        )
 
         allowed, reason = services.check_quota(self.tenant.pk, "messages_per_month")
 
@@ -78,15 +146,29 @@ class QuotaTests(TestCase):
         allowed, _ = services.check_quota(self.tenant.pk, "messages_per_month")
         self.assertTrue(allowed)
 
-    def test_a_broken_quota_lookup_lets_the_work_through(self):
-        """A billing table must never be the reason a customer's messages stop."""
-        plan = make_plan(max_messages_per_month=1)
+    def test_a_broken_quota_lookup_refuses_the_work(self):
+        """
+        Fails closed, which is the reversal Phase 2 turns on.
+
+        A lookup that raises cannot say the resource is free, and handing out
+        a paid resource on the strength of an exception is handing out the
+        product. The refusal is deliberately not phrased as a limit -- nothing
+        is known about the limit -- so the customer is told to try again
+        rather than to upgrade.
+        """
+        plan = make_plan(max_contacts=1)
         Subscription.objects.create(tenant=self.tenant, plan=plan)
 
         with patch.object(services, "usage", side_effect=RuntimeError("database on fire")):
-            allowed, _ = services.check_quota(self.tenant.pk, "messages_per_month")
+            allowed, reason = services.check_quota(self.tenant.pk, "contacts")
 
-        self.assertTrue(allowed)
+        self.assertFalse(allowed)
+        self.assertIn("try again", reason.lower())
+
+    def test_a_broken_feature_lookup_refuses_the_feature(self):
+        make_plan(name="Growth")
+        with patch.object(services, "get_active_subscription", side_effect=RuntimeError("nope")):
+            self.assertFalse(services.feature_enabled(self.tenant.pk, "ai_agent"))
 
     def test_quota_state_reports_limit_usage_and_remainder(self):
         plan = make_plan(max_messages_per_month=10)
@@ -121,7 +203,10 @@ class SendGateQuotaTests(TestCase):
     def test_an_exhausted_plan_blocks_rather_than_holds(self):
         from apps.messaging import gating
 
-        with patch("apps.subscriptions.services.check_quota", return_value=(False, "The Starter plan allows 10.")):
+        with patch(
+            "apps.subscriptions.services.claim_message_allowance",
+            return_value=(False, "The Starter plan allows 10."),
+        ):
             decision = gating.evaluate(self.message, account=None)
 
         self.assertEqual(decision.action, gating.BLOCK)
@@ -134,13 +219,15 @@ class SendGateQuotaTests(TestCase):
 
         self.message.kind = Message.Kind.NOTICE
 
-        with patch("apps.subscriptions.services.check_quota", return_value=(False, "Full.")) as checked:
+        with patch(
+            "apps.subscriptions.services.claim_message_allowance", return_value=(False, "Full."),
+        ) as claimed:
             try:
                 gating.evaluate(self.message, account=None)
             except Exception:
                 pass  # A NOTICE runs on past the quota into the number checks.
 
-        checked.assert_not_called()
+        claimed.assert_not_called()
         self.assertEqual(self.message.kind, Message.Kind.NOTICE)
 
 

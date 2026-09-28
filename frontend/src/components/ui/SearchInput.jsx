@@ -15,7 +15,7 @@ export default function SearchInput({ value, onChange, onClear, placeholder = "S
                 onChange={onChange}
                 placeholder={placeholder}
                 aria-label={placeholder}
-                className="w-full rounded-lg border border-ink-200 bg-white pl-9 pr-9 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 transition-colors hover:border-ink-300 focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 [&::-webkit-search-cancel-button]:hidden"
+                className="w-full rounded-lg border border-ink-200 bg-surface pl-9 pr-9 py-2.5 text-sm text-ink-900 placeholder:text-ink-400 transition-colors hover:border-ink-300 focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 [&::-webkit-search-cancel-button]:hidden"
             />
             {value && onClear && (
                 <button

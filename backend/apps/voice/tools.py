@@ -21,7 +21,7 @@ from django.utils.dateparse import parse_datetime
 
 from apps.ai import knowledge
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # Terminal actions a tool can demand of the engine.
 END_CALL = "END_CALL"

@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 from django.conf import settings
 
 from apps.ai import knowledge
-from apps.ai.providers.anthropic import AIProviderError, converse, tool_result_block
+from apps.ai.providers.registry import AIProviderError, converse, tool_result_block
 
 from . import tools
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # How many model round-trips one turn of conversation may take. One is the
 # normal case (answer). Two covers "look it up, then answer". Beyond that the
@@ -88,8 +88,23 @@ class TurnResult:
     tool_log: list = field(default_factory=list)
 
 
+def resolved(config):
+    """
+    The key, model and endpoint this call will go out with.
+
+    Shared with the WhatsApp agent (`apps.ai.providers.registry.credentials`)
+    rather than reimplemented, so a deployment that configured OPENAI_MODEL
+    once gets the same model on the phone as in the chat.
+    """
+    from apps.ai.providers.registry import credentials
+
+    return credentials(
+        config.model_provider, api_key=config.get_api_key(), model=config.model, base_url=config.base_url,
+    )
+
+
 def api_key(config) -> str | None:
-    return config.get_api_key() or getattr(settings, "AI_API_KEY", "") or None
+    return resolved(config).api_key
 
 
 def _business_profile(tenant_id):
@@ -244,6 +259,7 @@ def run_turn(config, session, caller_text: str) -> TurnResult:
     # mean a second WhatsApp message, a second booked callback, and the same
     # sentence read out twice down the phone.
     executed = {}
+    call_settings = resolved(config)
 
     for round_number in range(MAX_TOOL_ROUNDS):
         remaining = deadline - time.monotonic()
@@ -252,8 +268,10 @@ def run_turn(config, session, caller_text: str) -> TurnResult:
             break
 
         response = converse(
-            api_key=api_key(config),
-            model=config.model,
+            provider=config.model_provider,
+            api_key=call_settings.api_key,
+            model=call_settings.model,
+            base_url=call_settings.base_url,
             system=system,
             messages=messages,
             tools=definitions,
@@ -351,10 +369,13 @@ def summarise(config, session) -> str:
         "the person said they wanted, what was agreed, and anything still outstanding. Three or four "
         "short lines of plain text, no markdown. Do not invent anything that is not in the transcript."
     )
+    call_settings = resolved(config)
     try:
         response = converse(
-            api_key=api_key(config),
-            model=config.model,
+            provider=config.model_provider,
+            api_key=call_settings.api_key,
+            model=call_settings.model,
+            base_url=call_settings.base_url,
             system=system,
             messages=[{"role": "user", "content": "\n".join(lines)}],
             max_tokens=300,

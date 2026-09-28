@@ -1,6 +1,8 @@
 from django.contrib import admin
 
-from .models import AIAgentConfig, AIConversationState, AIUsageLog, KnowledgeChunk, KnowledgeDocument
+from .models import (
+    AIAgentConfig, AIConversationState, AIToolCall, AIUsageLog, KnowledgeChunk, KnowledgeDocument,
+)
 
 
 @admin.register(AIAgentConfig)
@@ -32,3 +34,25 @@ class AIConversationStateAdmin(admin.ModelAdmin):
 class AIUsageLogAdmin(admin.ModelAdmin):
     list_display = ["created_at", "tenant", "outcome", "model", "input_tokens", "output_tokens", "latency_ms"]
     list_filter = ["outcome", "model", "created_at"]
+
+
+@admin.register(AIToolCall)
+class AIToolCallAdmin(admin.ModelAdmin):
+    """
+    What the agent did, per call.
+
+    Read-only: this is an audit trail, and an audit trail somebody can edit is
+    not one. Filterable by error first, because "what has been refused or gone
+    wrong" is the question this table is opened to answer.
+    """
+
+    list_display = ["created_at", "tenant", "name", "is_error", "conversation", "whatsapp_account", "duration_ms"]
+    list_filter = ["is_error", "name", "created_at"]
+    search_fields = ["detail", "result", "device_id"]
+    readonly_fields = [field.name for field in AIToolCall._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

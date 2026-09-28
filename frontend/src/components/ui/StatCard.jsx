@@ -34,7 +34,7 @@ export default function StatCard({ label, value, hint, icon: Icon, tone = "defau
         </>
     );
 
-    const shell = "bg-white border border-ink-200 rounded-card shadow-card p-5 block no-underline";
+    const shell = "bg-surface border border-ink-200 rounded-card shadow-card p-5 block no-underline";
 
     if (to) {
         return (

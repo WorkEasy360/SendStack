@@ -54,6 +54,30 @@ class CompliancePolicy(models.Model):
         BUTTON = "BUTTON", "A tappable unsubscribe button"
 
     opt_out_style = models.CharField(max_length=10, choices=OptOutStyle.choices, default=OptOutStyle.FOOTER)
+
+    # -- Positive consent ---------------------------------------------------
+    #
+    # Whether a marketing message additionally requires a *recorded yes* from
+    # the contact, on top of the absence of a no.
+    #
+    # Default False, and that default is a deliberate, documented decision
+    # rather than a soft one. Every contact that exists today has
+    # marketing_consent=UNKNOWN, because nobody was ever asked to record it;
+    # switching this on by default would stop every existing customer's
+    # campaigns at the moment they deployed the upgrade. Turning it on is a
+    # business decision each tenant makes once they have recorded consent for
+    # the contacts they intend to market to -- see docs/CONSENT.md.
+    #
+    # It is enforced in exactly one place, the send gate, so it cannot be
+    # bypassed by a campaign, an automation, a workflow, the AI agent, a
+    # scheduled task or a paid feature.
+    require_marketing_consent = models.BooleanField(
+        default=False,
+        help_text=(
+            "Only send marketing to contacts with recorded consent. Contacts whose consent is "
+            "not recorded are skipped rather than messaged."
+        ),
+    )
     opt_out_button_title = models.CharField(max_length=20, default="Unsubscribe")
     opt_out_footer = models.CharField(max_length=200, default=DEFAULT_OPT_OUT_FOOTER, blank=True)
 
@@ -118,9 +142,37 @@ class ConsentEvent(models.Model):
         IMPORT = "IMPORT", "Contact import"
         API = "API", "API"
         SYSTEM = "SYSTEM", "System"
+        # Where a positive consent came from, mirroring Contact.ConsentSource
+        # so an OPT_IN row can say more than "somebody set a flag".
+        WEBSITE = "WEBSITE", "Website"
+        FORM = "FORM", "Opt-in form"
+        CRM = "CRM", "CRM or other system"
+        CUSTOMER_PROVIDED = "CUSTOMER_PROVIDED", "Provided by the customer"
+        OTHER = "OTHER", "Other"
 
     tenant = models.ForeignKey("tenants.Tenant", on_delete=models.CASCADE, related_name="consent_events")
-    contact = models.ForeignKey("contacts.Contact", on_delete=models.CASCADE, related_name="consent_events")
+
+    # SET_NULL, not CASCADE, and the phone number kept alongside it.
+    #
+    # Under CASCADE, deleting a contact silently destroyed the record that they
+    # had ever opted out -- which is the one fact that most needs to outlive
+    # them. Re-import the same number a month later and nothing anywhere says
+    # they asked to be left alone; and if they complain about messages already
+    # sent, the evidence that the opt-out was honoured is gone too.
+    #
+    # The number is denormalised here for the same reason. A consent row whose
+    # contact is NULL and which names nobody is not evidence of anything, so
+    # the identifier the decision was actually about -- the phone number -- is
+    # written onto the row at the moment it is created and never follows the
+    # contact out.
+    contact = models.ForeignKey(
+        "contacts.Contact", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="consent_events",
+    )
+    phone = models.CharField(
+        max_length=16, blank=True,
+        help_text="The number this decision was about, kept so the record survives the contact.",
+    )
     event = models.CharField(max_length=10, choices=Event.choices)
     source = models.CharField(max_length=20, choices=Source.choices, default=Source.SYSTEM)
     actor = models.ForeignKey(
@@ -140,7 +192,11 @@ class ConsentEvent(models.Model):
         indexes = [
             models.Index(fields=["tenant", "-created_at"]),
             models.Index(fields=["contact", "-created_at"]),
+            # "Has this number ever opted out?" -- the question asked before
+            # re-importing a list, and the one that has to stay answerable
+            # after the contact row itself is gone.
+            models.Index(fields=["tenant", "phone", "-created_at"]),
         ]
 
     def __str__(self):
-        return f"{self.contact_id}:{self.event}"
+        return f"{self.phone or self.contact_id}:{self.event}"

@@ -41,7 +41,7 @@ export default function Sidebar({ user, collapsed, onToggleCollapse, onLogout, o
     const groups = visibleGroups(user?.role);
 
     return (
-        <div className="h-full flex flex-col bg-white border-r border-ink-200">
+        <div className="h-full flex flex-col bg-surface border-r border-ink-200">
             <div
                 className={`h-16 shrink-0 flex items-center border-b border-ink-200 ${
                     collapsed ? "justify-center px-2" : "justify-between px-4"
@@ -115,7 +115,7 @@ export default function Sidebar({ user, collapsed, onToggleCollapse, onLogout, o
                     </button>
                 ) : (
                     <div className="flex items-center gap-2.5">
-                        <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-white text-sm font-bold flex items-center justify-center uppercase">
+                        <span className="shrink-0 w-9 h-9 rounded-lg bg-ink-900 text-ink-50 text-sm font-bold flex items-center justify-center uppercase">
                             {(user?.username || "?").charAt(0)}
                         </span>
                         <div className="min-w-0 flex-1">

@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 
 from apps.audit.services import log_event
 from apps.contacts.models import Contact
+from apps.subscriptions.services import require_feature
 from apps.whatsapp.models import WhatsAppAccount
 from core.bulk import BulkActionMixin
 
@@ -70,6 +71,18 @@ class FollowUpRuleViewSet(_ActivationBulkMixin, viewsets.ModelViewSet):
 
 
 class WorkflowViewSet(_ActivationBulkMixin, viewsets.ModelViewSet):
+    """
+    The drag-and-drop sequences, behind the `workflows` plan switch.
+
+    Listing, reading and deleting stay open on every plan: a customer whose
+    plan no longer includes workflows still owns the ones they built, still
+    needs to see why they stopped, and must be able to tidy them up. Creating,
+    editing and activating are what the switch closes -- together with
+    `services.start_workflow` and `services.resume_workflow`, which close the
+    same door from the execution side so a sequence cannot outlive the plan
+    that allowed it.
+    """
+
     permission_classes = [IsAuthenticated]
     serializer_class = WorkflowSerializer
     bulk_object_label = "workflow"
@@ -79,8 +92,22 @@ class WorkflowViewSet(_ActivationBulkMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         return Workflow.objects.filter(tenant=self.request.user.tenant)
 
+    def _require_workflows(self):
+        require_feature(self.request.user.tenant_id, services.WORKFLOWS_FEATURE)
+
     def perform_create(self, serializer):
+        self._require_workflows()
         serializer.save(tenant=self.request.user.tenant)
+
+    def perform_update(self, serializer):
+        # Covers editing the graph and flipping `is_active` through PATCH,
+        # which is the same door by a quieter route.
+        self._require_workflows()
+        serializer.save()
+
+    def _bulk_activate(self, request, instance):
+        self._require_workflows()
+        super()._bulk_activate(request, instance)
 
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None):

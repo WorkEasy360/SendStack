@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { UserCheck } from "lucide-react";
 import Sidebar from "../components/layout/Sidebar";
 import Topbar from "../components/layout/Topbar";
 import { useAuth } from "../context/AuthContext";
+import { setAppThemeActive } from "../utils/theme";
 
 const COLLAPSE_KEY = "sidebar_collapsed";
 
@@ -16,6 +17,15 @@ const COLLAPSE_KEY = "sidebar_collapsed";
 export default function AppLayout() {
     const { user, logout, impersonation, exitImpersonation } = useAuth();
     const { pathname } = useLocation();
+
+    // Dark mode belongs to the signed-in app: the class goes on <html> while
+    // this shell is mounted and comes off when it unmounts, so the public
+    // pages (which are designed light) are never affected. A layout effect,
+    // so the first paint is already the right theme.
+    useLayoutEffect(() => {
+        setAppThemeActive(true);
+        return () => setAppThemeActive(false);
+    }, []);
 
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === "1");
@@ -73,7 +83,7 @@ export default function AppLayout() {
                 {mobileNavOpen && (
                     <div className="lg:hidden fixed inset-0 z-50 flex">
                         <div
-                            className="absolute inset-0 bg-ink-900/50 animate-fade-in"
+                            className="absolute inset-0 bg-black/50 animate-fade-in"
                             onClick={() => setMobileNavOpen(false)}
                             role="presentation"
                         />

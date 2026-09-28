@@ -306,6 +306,67 @@ class TabularExtractionTests(TestCase):
             extraction.extract(io.BytesIO(b""), "empty.csv")
 
 
+class JsonExtractionTests(TestCase):
+    """
+    JSON is flattened into labelled sentences for the same reason CSV rows are:
+    a question shares words with "refund window days: 30" and shares none with
+    a wall of braces and quotes.
+    """
+
+    def test_nested_keys_become_labelled_sentences(self):
+        blob = b'{"refund_policy": {"window_days": 30, "condition": "unused"}}'
+
+        sections = extraction.extract(io.BytesIO(blob), "policies.json")
+
+        text = " ".join(section.text for section in sections)
+        self.assertIn("refund policy window days: 30", text)
+        self.assertIn("refund policy condition: unused", text)
+
+    def test_a_top_level_array_becomes_one_section_per_item(self):
+        blob = b'[{"name": "Premium", "price": 4999}, {"name": "Starter", "price": 999}]'
+
+        sections = extraction.extract(io.BytesIO(blob), "plans.json")
+
+        self.assertEqual(len(sections), 2)
+        self.assertIn("4999", sections[0].text)
+        self.assertIn("999", sections[1].text)
+
+    def test_a_list_of_scalars_reads_as_one_sentence(self):
+        blob = b'{"sizes": ["small", "medium", "large"]}'
+
+        sections = extraction.extract(io.BytesIO(blob), "sizes.json")
+
+        self.assertIn("sizes: small, medium, large", sections[0].text)
+
+    def test_each_top_level_key_gets_its_own_section(self):
+        # So a retrieval can return the shipping terms without the returns
+        # policy riding along with them.
+        blob = b'{"shipping": {"days": 2}, "returns": {"days": 14}}'
+
+        sections = extraction.extract(io.BytesIO(blob), "terms.json")
+
+        self.assertEqual([section.heading for section in sections], ["shipping", "returns"])
+
+    def test_empty_values_are_dropped_rather_than_labelled(self):
+        blob = b'{"product": {"name": "Widget", "discontinued": null, "note": ""}}'
+
+        sections = extraction.extract(io.BytesIO(blob), "product.json")
+
+        text = " ".join(section.text for section in sections)
+        self.assertIn("Widget", text)
+        self.assertNotIn("discontinued", text)
+        self.assertNotIn("note", text)
+
+    def test_malformed_json_is_refused_with_a_reason(self):
+        with self.assertRaises(extraction.ExtractionError) as caught:
+            extraction.extract(io.BytesIO(b'{"unclosed": '), "broken.json")
+
+        self.assertIn("not valid JSON", str(caught.exception))
+
+    def test_json_is_an_accepted_upload(self):
+        self.assertEqual(extraction.validate_upload("policies.json", 500, "application/json"), ".json")
+
+
 class CleaningTests(TestCase):
     def test_runs_of_whitespace_collapse_but_paragraphs_survive(self):
         cleaned = extraction.clean("A   line\n\n\n\nAnother   line")

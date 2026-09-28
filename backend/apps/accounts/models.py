@@ -3,6 +3,11 @@ from django.conf import settings
 from django.db import models
 
 
+# Deliberately still the pre-rebrand slug. It is the key 0002, 0008 and
+# every superuser creation look the platform tenant up by; renaming it
+# would create a second platform tenant and orphan the users on the
+# first. The display name is what the rebrand changed -- see
+# accounts/migrations/0011_rename_platform_tenant.py.
 PLATFORM_TENANT_SLUG = "multisender-platform"
 
 
@@ -22,7 +27,7 @@ class UserManager(BaseUserManager):
         if not extra_fields.get("tenant") and not extra_fields.get("tenant_id"):
             extra_fields["tenant"], _ = Tenant.objects.get_or_create(
                 slug=PLATFORM_TENANT_SLUG,
-                defaults={"name": "MultiSender Platform", "kind": Tenant.Kind.PLATFORM},
+                defaults={"name": "SendStack Platform", "kind": Tenant.Kind.PLATFORM},
             )
         return super().create_superuser(username, email, password, **extra_fields)
 
@@ -62,6 +67,20 @@ class User(AbstractUser):
     reserved_credits = models.PositiveIntegerField(
         default=0,
         help_text="Credits held against in-flight campaigns; not spendable again until released or consumed.",
+    )
+
+    # **Not** the same thing as accepting the Terms, and stored separately for
+    # exactly that reason. Accepting the Terms is entering a contract to use
+    # the service; this is permission to be sent product news. One field for
+    # both would make a legal acceptance record double as evidence of
+    # marketing consent, which it is not, and would make withdrawing the
+    # second look like withdrawing the first.
+    #
+    # Defaults to False and is never pre-ticked in the UI. Affirmative action
+    # or nothing -- see apps/accounts/registration.py.
+    marketing_opt_in = models.BooleanField(
+        default=False,
+        help_text="Permission to send this person product news. Separate from Terms acceptance.",
     )
 
     is_deleted = models.BooleanField(default=False)

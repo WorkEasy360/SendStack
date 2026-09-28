@@ -19,7 +19,7 @@ from django.dispatch import receiver
 
 from .models import KnowledgeDocument
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @receiver(post_delete, sender=KnowledgeDocument, dispatch_uid="ai_delete_knowledge_document_file")

@@ -2,7 +2,7 @@
 QR/device-linking provider, backed by a separate, self-hosted "QR bridge"
 microservice reached over HTTP + webhook.
 
-MultiSender does not implement, host, or reverse-engineer any WhatsApp
+SendStack does not implement, host, or reverse-engineer any WhatsApp
 protocol here. This module only speaks a documented HTTP contract to
 whatever bridge service is configured via ``QR_PROVIDER_BASE_URL`` --
 building/operating that bridge (e.g. wrapping a multi-device WhatsApp Web
@@ -38,9 +38,23 @@ HTTP contract expected of the bridge service:
                                     # caller must not retry it -- see
                                     # SendResult.ambiguous in base.py
 
+    POST   {base_url}/sessions/{session_id}/numbers/check      # the number filter
+           body: {"numbers": [<digits, no "+">, ...]}          # at most NUMBER_CHECK_BATCH
+           -> {"results": [{"number": str, "exists": bool, "jid": str | None}]}
+           -> 409 {"error", "code": "not_connected"} when the session has no live socket
+
+    GET    {base_url}/sessions/{session_id}/groups             # the group grabber, step one
+           -> {"groups": [{"id": str, "subject": str, "member_count": int,
+                           "announce": bool, "is_community": bool, "created_at": iso8601 | None}]}
+
+    POST   {base_url}/sessions/{session_id}/groups/members     # the group grabber, step two
+           body: {"group_ids": [str, ...]}
+           -> {"groups": [{"id": str, "subject": str, "hidden_count": int,
+                           "members": [{"phone": <digits>, "jid": str, "name": str, "is_admin": bool}]}]}
+
 Auth: every request carries ``Authorization: Bearer {QR_PROVIDER_API_KEY}``.
 
-Webhooks (bridge -> MultiSender) are HMAC-SHA256 over the raw body with
+Webhooks (bridge -> SendStack) are HMAC-SHA256 over the raw body with
 ``QR_PROVIDER_WEBHOOK_SECRET``, but the two kinds land on different Django
 views with different (historically-driven) header names:
 
@@ -69,6 +83,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import requests
 from django.conf import settings
@@ -78,6 +93,10 @@ from .base import (
     ConnectionSessionResult,
     ConnectionStatusResult,
     ConnectionWebhookEvent,
+    GroupMember,
+    GroupMembers,
+    GroupSummary,
+    NumberLookup,
     ProviderError,
     QRResult,
     SendResult,
@@ -86,7 +105,7 @@ from .base import (
     WhatsAppProvider,
 )
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 # A Baileys send can legitimately take longer than a typical HTTP call --
@@ -162,22 +181,81 @@ def _parse_iso8601(value: str | None) -> datetime | None:
         return None
 
 
+def _own_media_hosts() -> set[str]:
+    """
+    Hostnames that serve *this* deployment's media, whoever wrote the link.
+
+    A media link is absolute and is frozen into the template and every message
+    copied from it at the moment it is created, so a workspace accumulates
+    links from every origin it has ever been reached on: the public domain
+    today, a domain it moved off last year, and "127.0.0.1:8000" from a Django
+    run outside Docker while the containers were up on the same database. All
+    of them name the same file in the same MEDIA_ROOT, so all of them have to
+    be recognised as ours.
+
+    The loopback names are here because that is the origin a developer's
+    browser stamps in, and it is the one that fails most confusingly: the
+    bridge resolves it to *itself* and reports a connection refused that looks
+    like the send never left.
+    """
+    hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    public = getattr(settings, "MEDIA_PUBLIC_BASE_URL", "")
+    if public:
+        host = urlsplit(public).hostname
+        if host:
+            hosts.add(host.lower())
+    # A host Django is configured to answer for is a host it can have written
+    # a media link with. "*" is skipped deliberately -- it means "any host",
+    # and treating it as such here would claim someone else's CDN as ours and
+    # rewrite a genuinely external attachment into a 404.
+    for entry in getattr(settings, "ALLOWED_HOSTS", None) or []:
+        host = (entry or "").strip().lstrip(".").lower()
+        if host and host != "*":
+            hosts.add(host)
+    return hosts
+
+
 def _reachable_link(link: str) -> str:
     """
     The attachment URL as the bridge can actually fetch it.
 
     Baileys downloads the link from inside the qr-bridge container, so a link
     built for the browser ("http://localhost/media/x.png") resolves to that
-    container itself and the send fails. When both media base URLs are
-    configured, the public origin is swapped for the internal one on the way
-    out only -- what is stored on the message stays the link a person can open.
-    Unconfigured, this is a no-op.
+    container itself and the send fails. The origin is swapped for the
+    internal one on the way out only -- what is stored on the message stays
+    the link a person can open.
+
+    The match is on *what the link points at*, not on the exact origin string:
+    any host of ours (see _own_media_hosts) serving a path under MEDIA_URL is
+    the same file in the same MEDIA_ROOT, and the bridge should fetch it from
+    the one origin that resolves for it. Matching the configured public origin
+    literally -- as this did -- meant a link carrying any other origin of ours
+    was handed over untouched and the send died on a connection refused.
+
+    A link to somewhere that is genuinely not ours is left exactly as it is:
+    an attachment hosted on a customer's own CDN must still be fetched from
+    that CDN. With no internal origin configured this is a no-op.
     """
-    public = getattr(settings, "MEDIA_PUBLIC_BASE_URL", "")
     internal = getattr(settings, "MEDIA_INTERNAL_BASE_URL", "")
-    if link and public and internal and link.startswith(public):
-        return internal + link[len(public):]
-    return link
+    if not link or not internal:
+        return link
+
+    parts = urlsplit(link)
+    # Relative, or not something with an origin to replace ("data:", a bare
+    # path). Nothing to do, and nothing safe to guess.
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return link
+
+    media_url = getattr(settings, "MEDIA_URL", "") or "/media/"
+    if not parts.path.startswith(media_url):
+        return link
+    if parts.hostname.lower() not in _own_media_hosts():
+        return link
+
+    tail = parts.path
+    if parts.query:
+        tail = f"{tail}?{parts.query}"
+    return internal + tail
 
 
 class WhatsAppQRBridgeProvider(WhatsAppProvider):
@@ -185,9 +263,83 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
 
     supports_qr = True
 
-    # The bridge sends buttons as a native-flow interactive message -- see
-    # sendInteractive() in qr-bridge/src/providers/baileysProvider.ts.
-    supports_interactive_buttons = True
+    # False, although `send_interactive_message` below is implemented and the
+    # bridge really does relay a native-flow interactive message (see
+    # sendInteractive() in qr-bridge/src/providers/baileysProvider.ts).
+    #
+    # WhatsApp reserves interactive messages for the official Cloud API. A
+    # linked-device sender can put one on the wire and have it accepted -- the
+    # send succeeds, a provider message id comes back, the row goes to
+    # DELIVERED -- and the recipient's phone renders the body text with no
+    # buttons under it. Measured on a live connection here: 15 button messages
+    # sent, zero taps ever received, and no error anywhere to explain it.
+    #
+    # Claiming support we do not have is worse than having none, because it is
+    # what suppresses the numbered-list fallback in
+    # `messaging.services._send_with_buttons`. The customer is asked a question
+    # with no way to answer it, and every part of the system reports success.
+    # So the flag states what actually reaches a phone, and the send path
+    # degrades to numbered options that `automation.services` maps back to the
+    # original button ids.
+    #
+    # RE-MEASURED 2026-09-03, on a QR-linked WhatsApp *Business* account
+    # (creds platform `smba`) against Baileys 6.7.24 -- because "it was only
+    # tested on a personal number" is the obvious objection to the paragraph
+    # above, and it turned out not to be the explanation. All five wire shapes
+    # WhatsApp has ever carried buttons in were sent to a real handset. Every
+    # one returned HTTP 200 with a provider message id:
+    #
+    #   native_flow         (interactiveMessage in a viewOnce wrapper)  never arrived
+    #   native_flow_v1      (+ messageParamsJson/messageVersion/footer) never arrived
+    #   interactive_direct  (interactiveMessage, no wrapper)            never arrived
+    #   buttons_legacy      (buttonsMessage)            arrived as plain text
+    #   template            (templateMessage)           arrived as plain text
+    #
+    # Two things follow, and the second is the dangerous one:
+    #
+    #   1. No envelope renders tappable buttons on a linked device. Being a
+    #      Business account does not change this.
+    #   2. The three `interactiveMessage` shapes are **silently discarded in
+    #      transit** -- the message never reaches the recipient at all, while
+    #      every layer reports a successful send. That is strictly worse than
+    #      the flattening this flag already prevents: not "asked a question
+    #      they cannot answer", but "never asked anything".
+    #
+    # So flipping this to True would not merely fail to produce buttons; on the
+    # shape `send_interactive_message` actually uses it would make campaign
+    # messages vanish. Do not flip it without repeating the handset comparison
+    # -- qr-bridge/src/config.ts documents how, and the bridge accepts a
+    # per-request `format` so the test costs one curl per shape.
+    supports_interactive_buttons = False
+
+    # A link button rides on the same native-flow interactive message and
+    # therefore does not render either. It degrades to the URL printed in the
+    # text, which is the whole of what tapping it would have done.
+    supports_url_buttons = False
+
+    # Nor a menu. `interactive.type = "list"` is a Cloud API construct; the
+    # older Baileys listMessage shape stopped rendering on modern clients for
+    # the same reason buttonsMessage did. It degrades to a numbered list.
+    supports_list_messages = False
+
+    # Polls, on the other hand, this connection genuinely does send -- they
+    # are a personal/Business-app WhatsApp feature, which is exactly what a
+    # linked device is, and Baileys relays them as a native poll the recipient
+    # votes in. This is the one message type where a QR number is *more*
+    # capable than the official API, which has no poll type at all.
+    supports_poll_messages = True
+
+    # Both lookups are things a phone can do and the official API cannot: a
+    # linked device asks the same contact-sync query the app itself runs when
+    # you add somebody to your address book, and it sees every group the
+    # phone is in. Neither is available on a Cloud API number at any version.
+    supports_number_check = True
+    supports_group_listing = True
+
+    #: Most numbers one bridge call carries. Mirrors
+    #: NUMBER_LOOKUP_MAX_PER_REQUEST in qr-bridge/src/providers/base.ts; the
+    #: bridge refuses anything larger, so this adapter splits above it.
+    NUMBER_CHECK_BATCH = 500
 
     def __init__(self, base_url: str, api_key: str, webhook_secret: str):
         self._base_url = base_url.rstrip("/")
@@ -238,7 +390,10 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
         if not response.ok:
             raise ProviderError(
                 data.get("error") or f"QR provider returned HTTP {response.status_code}.",
-                code="provider_error",
+                # The bridge names a few of its refusals ("not_connected",
+                # "lookup_failed"); anything unnamed is the generic code every
+                # existing caller already handles.
+                code=str(data.get("code") or "provider_error")[:64],
                 # The bridge sets this when it gave up on a send that was
                 # already in flight to WhatsApp (see its own send timeout).
                 ambiguous=bool(data.get("ambiguous")),
@@ -309,10 +464,13 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
             error=status_result.error,
         )
 
-    def send_text_message(self, account, to: str, body: str) -> SendResult:
-        return self._send(account, {"to": to, "type": "text", "text": {"body": body}})
+    def send_text_message(self, account, to: str, body: str, operation_id: str = "") -> SendResult:
+        return self._send(
+            account, {"to": to, "type": "text", "text": {"body": body}}, operation_id=operation_id,
+        )
 
-    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None) -> SendResult:
+    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None,
+                           operation_id: str = "") -> SendResult:
         return self._send(
             account,
             {
@@ -320,11 +478,15 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
                 "type": media_type,
                 "media": {"link": _reachable_link(media_link), "caption": caption, "filename": filename},
             },
+            operation_id=operation_id,
         )
 
-    def send_interactive_message(self, account, to: str, body: str, buttons: list) -> SendResult:
+    def send_interactive_message(self, account, to: str, body: str, buttons: list,
+                                 operation_id: str = "") -> SendResult:
         if not buttons:
-            return SendResult(success=False, error="This message has no buttons to send.")
+            return SendResult(
+                success=False, error="This message has no buttons to send.", code="invalid_request",
+            )
         return self._send(
             account,
             {
@@ -332,9 +494,41 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
                 "type": "interactive",
                 "interactive": {"body": body, "buttons": buttons},
             },
+            operation_id=operation_id,
         )
 
-    def send_template_message(self, account, to, template_name, language_code, components=None) -> SendResult:
+    def send_poll_message(self, account, to: str, poll_content: dict, operation_id: str = "") -> SendResult:
+        """
+        Send a native poll.
+
+        ``selectable_count`` is how the multi-answer switch reaches WhatsApp:
+        1 lets the recipient pick one option, and the option count lets them
+        pick any number. It is computed here rather than in the bridge because
+        the poll's own shape is what determines it, and the bridge should not
+        have to re-derive a rule this side already knows.
+        """
+        options = list((poll_content or {}).get("options") or [])
+        if len(options) < 2:
+            return SendResult(
+                success=False, error="A poll needs at least two options.", code="invalid_request",
+            )
+
+        return self._send(
+            account,
+            {
+                "to": to,
+                "type": "poll",
+                "poll": {
+                    "question": poll_content.get("question") or "",
+                    "options": options,
+                    "selectable_count": len(options) if poll_content.get("allow_multiple") else 1,
+                },
+            },
+            operation_id=operation_id,
+        )
+
+    def send_template_message(self, account, to, template_name, language_code, components=None,
+                              operation_id: str = "") -> SendResult:
         # Session-based (non-Cloud-API) WhatsApp connections do not use
         # Meta's approved-template system -- templates are a Cloud API/BSP
         # concept tied to Meta's messaging limits, not something a
@@ -344,14 +538,24 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
             code="not_supported",
         )
 
-    def _send(self, account, payload: dict) -> SendResult:
+    def _send(self, account, payload: dict, *, operation_id: str = "") -> SendResult:
         if not account.provider_session_id:
-            return SendResult(success=False, error="WhatsApp account has no active session.")
+            return SendResult(
+                success=False, error="WhatsApp account has no active session.", code="no_session",
+            )
 
         to = _to_msisdn(payload.get("to"))
         if not to:
-            return SendResult(success=False, error="Recipient phone number is not a valid number.")
+            return SendResult(
+                success=False, error="Recipient phone number is not a valid number.", code="invalid_recipient",
+            )
         payload = {**payload, "to": to}
+        if operation_id:
+            # The bridge keys its dedup store on this: a second POST with the
+            # same send_operation_id returns the first result and does NOT
+            # send again. It also lets us ask "what happened to this send?"
+            # after a lost response -- see get_send_operation_status.
+            payload["send_operation_id"] = operation_id
 
         started = time.monotonic()
         try:
@@ -362,13 +566,19 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
                 account.pk, to, payload.get("type"), time.monotonic() - started,
                 exc.message, exc.code, exc.ambiguous,
             )
-            return SendResult(success=False, error=exc.message, ambiguous=exc.ambiguous)
+            return SendResult(
+                success=False, error=exc.message, ambiguous=exc.ambiguous, code=exc.code or "",
+            )
 
         result = SendResult(
             success=data.get("success", False),
             provider_message_id=data.get("provider_message_id"),
             error=data.get("error"),
             ambiguous=bool(data.get("ambiguous")),
+            # The bridge's own classification where it sent one. Trimmed and
+            # coerced to a string: this reaches a CharField, and it is a value
+            # from another service rather than one this codebase produced.
+            code=str(data.get("code") or "")[:64],
         )
         logger.info(
             "QR send account_id=%s to=%s type=%s success=%s in %.3fs provider_message_id=%s",
@@ -376,6 +586,122 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
             result.provider_message_id,
         )
         return result
+
+    def _require_session(self, account) -> str:
+        if not account.provider_session_id:
+            raise ProviderError("WhatsApp account has no active session.", code="no_session")
+        return account.provider_session_id
+
+    def check_numbers(self, account, phones: list[str]) -> list[NumberLookup]:
+        session_id = self._require_session(account)
+        phones = list(phones)
+        results: list[NumberLookup] = []
+        for start in range(0, len(phones), self.NUMBER_CHECK_BATCH):
+            batch = phones[start:start + self.NUMBER_CHECK_BATCH]
+            # Asked by bare digits (see _to_msisdn) and matched back the same
+            # way: the bridge echoes each number exactly as it was sent.
+            wire = [_to_msisdn(phone) for phone in batch]
+            askable = [number for number in wire if number]
+            answers: dict[str, dict] = {}
+            if askable:
+                data = self._request(
+                    "POST", f"/sessions/{session_id}/numbers/check", json={"numbers": askable},
+                )
+                for row in data.get("results") or []:
+                    if isinstance(row, dict) and row.get("number") is not None:
+                        answers[str(row["number"])] = row
+            for phone, number in zip(batch, wire):
+                row = answers.get(number) if number else None
+                results.append(NumberLookup(
+                    phone=phone,
+                    exists=bool(row and row.get("exists")),
+                    jid=(str(row.get("jid"))[:64] if row and row.get("jid") else None),
+                ))
+        return results
+
+    def list_groups(self, account) -> list[GroupSummary]:
+        session_id = self._require_session(account)
+        data = self._request("GET", f"/sessions/{session_id}/groups")
+        groups = []
+        for row in data.get("groups") or []:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            groups.append(GroupSummary(
+                id=str(row["id"])[:64],
+                subject=str(row.get("subject") or "")[:255],
+                member_count=int(row.get("member_count") or 0),
+                announce=bool(row.get("announce")),
+                is_community=bool(row.get("is_community")),
+                created_at=_parse_iso8601(row.get("created_at")),
+            ))
+        return groups
+
+    def get_group_members(self, account, group_ids: list[str]) -> list[GroupMembers]:
+        session_id = self._require_session(account)
+        data = self._request(
+            "POST", f"/sessions/{session_id}/groups/members", json={"group_ids": list(group_ids)},
+        )
+        groups = []
+        for row in data.get("groups") or []:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            members = []
+            for member in row.get("members") or []:
+                if not isinstance(member, dict):
+                    continue
+                digits = re.sub(r"\D", "", str(member.get("phone") or ""))
+                if not digits:
+                    continue
+                members.append(GroupMember(
+                    phone=f"+{digits}",
+                    jid=str(member.get("jid") or "")[:64],
+                    name=str(member.get("name") or "").strip()[:150],
+                    is_admin=bool(member.get("is_admin")),
+                ))
+            groups.append(GroupMembers(
+                id=str(row["id"])[:64],
+                subject=str(row.get("subject") or "")[:255],
+                members=members,
+                hidden_count=int(row.get("hidden_count") or 0),
+            ))
+        return groups
+
+    def get_send_operation_status(self, account, operation_id: str) -> dict | None:
+        """
+        Ask the bridge what became of one send, by its ``send_operation_id``.
+
+        The recovery sweep calls this when a worker died after POSTing a
+        message but before recording the reply. The bridge answers from its
+        dedup store::
+
+            GET /sessions/{session_id}/operations/{operation_id}
+            -> 200 {"known": bool, "sent": bool,
+                    "provider_message_id": str | None, "ambiguous": bool}
+            -> 404 {"known": false}   (never saw this operation id)
+
+        Returns ``{"unreachable": True}`` if the bridge cannot be reached, so
+        the sweep marks the message UNKNOWN rather than guessing.
+        """
+        if not account.provider_session_id or not operation_id:
+            return {"known": False, "sent": False}
+        try:
+            data = self._request(
+                "GET", f"/sessions/{account.provider_session_id}/operations/{operation_id}",
+            )
+        except ProviderError as exc:
+            if exc.code == "provider_error" and "404" in (exc.message or ""):
+                return {"known": False, "sent": False}
+            logger.warning(
+                "QR operation lookup failed account_id=%s operation_id=%s: %s",
+                account.pk, operation_id, exc.message,
+            )
+            return {"unreachable": True}
+        return {
+            "known": bool(data.get("known")),
+            "sent": bool(data.get("sent")),
+            "provider_message_id": data.get("provider_message_id"),
+            "ambiguous": bool(data.get("ambiguous")),
+        }
 
     def verify_webhook_challenge(self, account, query_params: dict) -> str | None:
         # The bridge posts events directly (see parse_connection_webhook) --
@@ -422,6 +748,10 @@ class WhatsAppQRBridgeProvider(WhatsAppProvider):
                     raw=status_obj,
                     message_id=message_id,
                     status=status.upper(),
+                    # Echoed by the bridge on statuses for a send it received a
+                    # send_operation_id with -- lets a receipt be tied back to
+                    # the right message when the provider_message_id was lost.
+                    biz_opaque_callback_data=status_obj.get("send_operation_id"),
                 )
             )
         return events
@@ -466,6 +796,14 @@ class NotConfiguredProvider(WhatsAppProvider):
 
     supports_qr = True
 
+    # Everything is False, including text and media, which every other
+    # provider declares True. That is the honest answer here: this stand-in
+    # cannot deliver anything at all, and a capability dict that claimed
+    # otherwise would have the composer offer message types against a
+    # connection with no bridge behind it.
+    supports_text = False
+    supports_media = False
+
     def __init__(self, message: str = "QR provider is not configured.", code: str = "not_configured"):
         self._message = message
         self._code = code
@@ -488,16 +826,33 @@ class NotConfiguredProvider(WhatsAppProvider):
     def get_account_info(self, account) -> ConnectionResult:
         self._unavailable()
 
-    def send_text_message(self, account, to, body):
+    def send_text_message(self, account, to, body, operation_id: str = ""):
         self._unavailable()
 
-    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None):
+    def check_numbers(self, account, phones):
         self._unavailable()
 
-    def send_interactive_message(self, account, to, body, buttons):
+    def list_groups(self, account):
         self._unavailable()
 
-    def send_template_message(self, account, to, template_name, language_code, components=None):
+    def get_group_members(self, account, group_ids):
+        self._unavailable()
+
+    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None,
+                           operation_id: str = ""):
+        self._unavailable()
+
+    def send_interactive_message(self, account, to, body, buttons, operation_id: str = ""):
+        self._unavailable()
+
+    def send_list_message(self, account, to, body, list_content, operation_id: str = ""):
+        self._unavailable()
+
+    def send_poll_message(self, account, to, poll_content, operation_id: str = ""):
+        self._unavailable()
+
+    def send_template_message(self, account, to, template_name, language_code, components=None,
+                              operation_id: str = ""):
         self._unavailable()
 
     def verify_webhook_challenge(self, account, query_params):

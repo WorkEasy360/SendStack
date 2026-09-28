@@ -1,79 +1,200 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Handshake, Plus, Settings2, Trash2 } from "lucide-react";
+import { ChevronDown, Handshake, Plus, Settings2, StickyNote, Trash2 } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
 import Alert from "../../components/ui/Alert";
-import Badge from "../../components/ui/Badge";
 import Button from "../../components/ui/Button";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import EmptyState from "../../components/ui/EmptyState";
 import Modal from "../../components/ui/Modal";
 import PageHeader from "../../components/ui/PageHeader";
 import Spinner from "../../components/ui/Spinner";
-import { Field, Input, Select } from "../../components/ui/Field";
+import { Field, Input, Select, Textarea } from "../../components/ui/Field";
 import { useToast } from "../../components/ui/Toast";
 import { formatDate, formatMoney, timeAgo } from "../../components/crm/CrmBits";
 
 /**
  * The sales board: one column per stage, one card per deal.
  *
- * Deals move with a dropdown on the card rather than by dragging. Dragging
- * looks better in a screenshot, but this board is used on a phone as often as
- * a laptop, drag targets are the first thing to break on touch, and a select
- * is reachable by keyboard and screen reader for free. It also costs no
- * dependency, which matters more here than the animation does.
+ * Deals move two ways, and both matter. Dragging a card onto a column is what
+ * anyone who has used a board expects, so it is the obvious path on a laptop.
+ * The dropdown on every card stays, because HTML5 drag does not exist on touch
+ * and is awkward with a keyboard or a screen reader -- this board is used on a
+ * phone as often as a desktop. Both call the same move, so neither can drift.
+ *
+ * Native drag events, not a library: a board this size does not need the
+ * animation a drag-and-drop dependency buys, and the dropdown already covers
+ * the cases native drag cannot reach.
+ *
+ * A card at rest shows the deal and what it is worth, and nothing else. Owner,
+ * dates, notes and the stage dropdown live behind "Details", because scanning
+ * a column for the deal you want is the thing this screen is for -- five lines
+ * per card turns fifteen deals into a scroll, and a board you have to scroll
+ * stops being a board.
  */
 
-const KIND_ACCENT = {
-    WON: "border-t-brand-500",
-    LOST: "border-t-red-400",
-    OPEN: "border-t-ink-300",
-};
+function DealCard({ deal, stages, onMove, onEdit, onDelete, onNote, onDragStart, onDragEnd, isDragging }) {
+    const [open, setOpen] = useState(false);
+    // A native <select> inside a draggable element does not open reliably --
+    // the browser starts dragging the card instead. Suspending draggable while
+    // the pointer is inside the details panel keeps both paths working.
+    const [draggable, setDraggable] = useState(true);
 
-function DealCard({ deal, stages, onMove, onEdit }) {
     return (
-        <div className="bg-white border border-ink-200 rounded-card p-3 shadow-card">
-            <div className="flex items-start justify-between gap-2">
-                <button
-                    type="button"
-                    onClick={() => onEdit(deal)}
-                    className="text-sm font-bold text-ink-900 bg-transparent border-0 p-0 text-left cursor-pointer hover:text-brand-700"
+        <div
+            draggable={draggable}
+            onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", String(deal.id));
+                onDragStart(deal);
+            }}
+            onDragEnd={onDragEnd}
+            className={`bg-surface border rounded-lg cursor-grab active:cursor-grabbing transition-all ${
+                isDragging ? "opacity-40 border-ink-200" : "border-ink-200 hover:border-ink-300 hover:shadow-card"
+            }`}
+        >
+            <div className="px-3 py-2.5">
+                <div className="flex items-baseline justify-between gap-2">
+                    <p className="text-sm font-semibold text-ink-900 m-0 truncate">{deal.name}</p>
+                    <span className="text-sm font-semibold text-ink-900 tabular-nums shrink-0">
+                        {formatMoney(deal.value, deal.currency)}
+                    </span>
+                </div>
+
+                <div className="flex items-center gap-2 mt-1.5">
+                    <button
+                        type="button"
+                        aria-expanded={open}
+                        onClick={() => setOpen(!open)}
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-ink-500 bg-transparent border-0 p-0 cursor-pointer hover:text-brand-700"
+                    >
+                        <ChevronDown
+                            size={12}
+                            className={`transition-transform ${open ? "rotate-180" : ""}`}
+                            aria-hidden="true"
+                        />
+                        Details
+                    </button>
+                    {/* Collapsed, a note would be invisible; this is the one hint
+                        that there is something written down worth opening. */}
+                    {deal.notes && !open && (
+                        <StickyNote size={12} className="text-brand-600" aria-label="Has a note" />
+                    )}
+                </div>
+            </div>
+
+            {open && (
+                <div
+                    onPointerEnter={() => setDraggable(false)}
+                    onPointerLeave={() => setDraggable(true)}
+                    className="border-t border-ink-100 px-3 py-2.5 space-y-3"
                 >
-                    {deal.name}
-                </button>
-                <span className="text-sm font-bold text-ink-900 tabular-nums shrink-0">
-                    {formatMoney(deal.value, deal.currency)}
-                </span>
-            </div>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 m-0 text-xs">
+                        <dt className="text-ink-500">Customer</dt>
+                        <dd className="m-0 min-w-0">
+                            <Link
+                                to={`/contacts/${deal.contact}`}
+                                className="block text-brand-700 no-underline hover:underline truncate"
+                            >
+                                {deal.contact_name}
+                            </Link>
+                        </dd>
+                        {deal.owner_username && (
+                            <>
+                                <dt className="text-ink-500">Owner</dt>
+                                <dd className="m-0 text-ink-700 truncate">{deal.owner_username}</dd>
+                            </>
+                        )}
+                        {deal.expected_close_date && (
+                            <>
+                                <dt className="text-ink-500">Closes</dt>
+                                <dd className="m-0 text-ink-700">{formatDate(deal.expected_close_date)}</dd>
+                            </>
+                        )}
+                        <dt className="text-ink-500">Updated</dt>
+                        <dd className="m-0 text-ink-700">{timeAgo(deal.updated_at)}</dd>
+                    </dl>
 
-            <Link
-                to={`/contacts/${deal.contact}`}
-                className="block text-xs text-brand-700 no-underline hover:underline mt-1 truncate"
-            >
-                {deal.contact_name}
-            </Link>
+                    {deal.notes && (
+                        <button
+                            type="button"
+                            onClick={() => onNote(deal)}
+                            className="block w-full text-left text-xs text-ink-700 bg-ink-50 border border-ink-200 rounded-md px-2 py-1.5 whitespace-pre-line line-clamp-4 cursor-pointer hover:border-ink-300"
+                        >
+                            {deal.notes}
+                        </button>
+                    )}
 
-            <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                {deal.owner_username && <Badge tone="gray">{deal.owner_username}</Badge>}
-                {deal.expected_close_date && <Badge tone="blue">{formatDate(deal.expected_close_date)}</Badge>}
-            </div>
+                    <div>
+                        <label
+                            htmlFor={`deal-${deal.id}-stage`}
+                            className="block text-[11px] font-medium text-ink-500 mb-1"
+                        >
+                            Stage
+                        </label>
+                        <Select
+                            id={`deal-${deal.id}-stage`}
+                            value={deal.stage}
+                            className="text-xs"
+                            onChange={(event) => onMove(deal, event.target.value)}
+                        >
+                            {stages.map((stage) => (
+                                <option key={stage.id} value={stage.id}>
+                                    {stage.name}
+                                </option>
+                            ))}
+                        </Select>
+                    </div>
 
-            <Select
-                value={deal.stage}
-                className="mt-3 text-xs"
-                aria-label={`Move ${deal.name} to another stage`}
-                onChange={(event) => onMove(deal, event.target.value)}
-            >
-                {stages.map((stage) => (
-                    <option key={stage.id} value={stage.id}>
-                        {stage.name}
-                    </option>
-                ))}
-            </Select>
-
-            <p className="text-[11px] text-ink-400 mt-2 mb-0">Updated {timeAgo(deal.updated_at)}</p>
+                    <div className="flex items-center gap-1.5">
+                        <Button size="xs" variant="secondary" icon={StickyNote} onClick={() => onNote(deal)}>
+                            {deal.notes ? "Edit note" : "Add note"}
+                        </Button>
+                        <Button size="xs" variant="secondary" onClick={() => onEdit(deal)}>
+                            Edit
+                        </Button>
+                        <Button
+                            size="xs"
+                            variant="ghost"
+                            className="ml-auto"
+                            aria-label={`Delete ${deal.name}`}
+                            onClick={() => onDelete(deal)}
+                        >
+                            <Trash2 size={13} />
+                        </Button>
+                    </div>
+                </div>
+            )}
         </div>
     );
+}
+
+/**
+ * The board with one deal moved between columns, counts and totals included.
+ *
+ * Pure, and only ever a stand-in: the reload that follows the request is the
+ * real answer. It exists so a dropped card lands where it was dropped instead
+ * of snapping back for the length of a round trip.
+ */
+function boardWithMove(board, deal, stageId) {
+    if (!board) return board;
+    const moved = { ...deal, stage: stageId };
+    return {
+        ...board,
+        columns: board.columns.map((column) => {
+            const leaving = column.stage.id === deal.stage;
+            const arriving = column.stage.id === stageId;
+            if (!leaving && !arriving) return column;
+            return {
+                ...column,
+                deals: leaving
+                    ? column.deals.filter((item) => item.id !== deal.id)
+                    : [moved, ...column.deals],
+                count: column.count + (leaving ? -1 : 1),
+                value: Number(column.value || 0) + Number(deal.value || 0) * (leaving ? -1 : 1),
+            };
+        }),
+    };
 }
 
 const EMPTY_DEAL = { name: "", contact: "", value: "", currency: "INR", expected_close_date: "", notes: "" };
@@ -94,6 +215,9 @@ export default function Pipeline() {
     const [stageForm, setStageForm] = useState(null);
     const [pendingStageDelete, setPendingStageDelete] = useState(null);
     const [pendingDealDelete, setPendingDealDelete] = useState(null);
+    const [draggedDeal, setDraggedDeal] = useState(null);
+    const [dropStageId, setDropStageId] = useState(null);
+    const [noteForm, setNoteForm] = useState(null);
 
     useEffect(() => {
         api.get("/crm/pipelines/")
@@ -144,10 +268,13 @@ export default function Pipeline() {
 
     const moveDeal = async (deal, stageId) => {
         if (String(deal.stage) === String(stageId)) return;
+        const before = board;
+        setBoard(boardWithMove(board, deal, Number(stageId)));
         try {
             await api.post(`/crm/deals/${deal.id}/move/`, { stage: Number(stageId) });
             await loadBoard();
         } catch (err) {
+            setBoard(before);
             toast.error(apiErrorMessage(err, "Could not move that deal."));
         }
     };
@@ -173,6 +300,25 @@ export default function Pipeline() {
             await loadBoard();
         } catch (err) {
             toast.error(apiErrorMessage(err, "Could not save that deal."));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    // A note of its own, without opening the whole deal form. Writing one down
+    // is the thing most likely to happen mid-call, and a five-field modal is
+    // enough friction that it gets skipped -- which is how a board ends up
+    // holding numbers nobody can explain a week later.
+    const saveNote = async (event) => {
+        event.preventDefault();
+        setBusy(true);
+        try {
+            await api.patch(`/crm/deals/${noteForm.id}/`, { notes: noteForm.notes });
+            setNoteForm(null);
+            toast.success("Note saved.");
+            await loadBoard();
+        } catch (err) {
+            toast.error(apiErrorMessage(err, "Could not save that note."));
         } finally {
             setBusy(false);
         }
@@ -301,53 +447,115 @@ export default function Pipeline() {
                     }
                 />
             ) : (
-                <div className="scroll-x flex gap-4 pb-4 items-start">
-                    {columns.map((column) => (
-                        <div
-                            key={column.stage.id}
-                            className={`w-72 shrink-0 rounded-card bg-ink-50 border border-ink-200 border-t-4 ${
-                                KIND_ACCENT[column.stage.kind] || KIND_ACCENT.OPEN
-                            }`}
-                        >
-                            <div className="px-3 py-3 border-b border-ink-200">
-                                <div className="flex items-center justify-between gap-2">
-                                    <p className="text-sm font-bold text-ink-900 m-0 truncate">{column.stage.name}</p>
-                                    <span className="text-xs font-semibold text-ink-500 tabular-nums shrink-0">
-                                        {column.count}
-                                    </span>
+                // A grid rather than a row of fixed-width columns, so every stage
+                // is on screen at once instead of behind a sideways scroll. The
+                // 11rem floor is what keeps that honest: a pipeline with enough
+                // stages to squeeze its columns unreadable scrolls again rather
+                // than shrinking them to slivers.
+                <div className="scroll-x pb-4">
+                    <div
+                        className="grid gap-3 items-start"
+                        style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(11rem, 1fr))` }}
+                    >
+                        {columns.map((column) => {
+                            const isDropTarget =
+                                dropStageId === column.stage.id &&
+                                draggedDeal &&
+                                draggedDeal.stage !== column.stage.id;
+                            return (
+                                <div
+                                    key={column.stage.id}
+                                    onDragOver={(event) => {
+                                        // Only preventDefault marks a valid drop target; without
+                                        // it the browser refuses the drop and animates the card back.
+                                        if (!draggedDeal) return;
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "move";
+                                        if (dropStageId !== column.stage.id) setDropStageId(column.stage.id);
+                                    }}
+                                    onDragLeave={(event) => {
+                                        // Moving between the column's own children fires a leave
+                                        // too; only a pointer that has left the column counts.
+                                        if (!event.currentTarget.contains(event.relatedTarget)) {
+                                            setDropStageId(null);
+                                        }
+                                    }}
+                                    onDrop={(event) => {
+                                        event.preventDefault();
+                                        const deal = draggedDeal;
+                                        setDropStageId(null);
+                                        setDraggedDeal(null);
+                                        if (deal) moveDeal(deal, column.stage.id);
+                                    }}
+                                    // The stage's own colour is already stored and already
+                                    // editable, so using it here means the board reads the
+                                    // same as the Stages dialog rather than a second map.
+                                    style={{ borderTopColor: column.stage.color, borderTopWidth: "3px" }}
+                                    className={`min-w-0 rounded-lg border transition-colors ${
+                                        isDropTarget
+                                            ? "bg-brand-50 border-brand-300 ring-2 ring-brand-500/30"
+                                            : "bg-ink-50/60 border-ink-200"
+                                    }`}
+                                >
+                                    <div className="px-3 py-2.5 border-b border-ink-200">
+                                        <div className="flex items-center gap-2">
+                                            <p className="flex-1 min-w-0 text-xs font-semibold uppercase tracking-wide text-ink-600 m-0 truncate">
+                                                {column.stage.name}
+                                            </p>
+                                            <span className="text-[11px] font-semibold text-ink-600 tabular-nums bg-surface border border-ink-200 rounded-full px-1.5 shrink-0">
+                                                {column.count}
+                                            </span>
+                                        </div>
+                                        <p className="text-sm font-semibold text-ink-900 mt-1 mb-0 tabular-nums">
+                                            {formatMoney(column.value, currency)}
+                                        </p>
+                                    </div>
+                                    <div className="p-2 space-y-2 max-h-[calc(100vh-19rem)] overflow-y-auto">
+                                        {column.deals.length === 0 ? (
+                                            <p className="text-xs text-ink-400 text-center py-8 m-0">
+                                                {draggedDeal ? "Drop here" : "No deals"}
+                                            </p>
+                                        ) : (
+                                            column.deals.map((deal) => (
+                                                <DealCard
+                                                    key={deal.id}
+                                                    deal={deal}
+                                                    stages={stages}
+                                                    onMove={moveDeal}
+                                                onDelete={setPendingDealDelete}
+                                                onNote={(item) =>
+                                                    setNoteForm({
+                                                        id: item.id,
+                                                        name: item.name,
+                                                        notes: item.notes || "",
+                                                    })
+                                                }
+                                                    isDragging={draggedDeal?.id === deal.id}
+                                                    onDragStart={setDraggedDeal}
+                                                    onDragEnd={() => {
+                                                        setDraggedDeal(null);
+                                                        setDropStageId(null);
+                                                    }}
+                                                    onEdit={(item) =>
+                                                        setDealForm({
+                                                            id: item.id,
+                                                            name: item.name,
+                                                            contact: item.contact,
+                                                            contact_name: item.contact_name,
+                                                            value: item.value,
+                                                            currency: item.currency,
+                                                            expected_close_date: item.expected_close_date || "",
+                                                            notes: item.notes || "",
+                                                        })
+                                                    }
+                                                />
+                                            ))
+                                        )}
+                                    </div>
                                 </div>
-                                <p className="text-xs text-ink-500 mt-0.5 mb-0 tabular-nums">
-                                    {formatMoney(column.value, currency)}
-                                </p>
-                            </div>
-                            <div className="p-2.5 space-y-2.5 max-h-[calc(100vh-20rem)] overflow-y-auto">
-                                {column.deals.length === 0 ? (
-                                    <p className="text-xs text-ink-400 text-center py-6 m-0">Nothing here</p>
-                                ) : (
-                                    column.deals.map((deal) => (
-                                        <DealCard
-                                            key={deal.id}
-                                            deal={deal}
-                                            stages={stages}
-                                            onMove={moveDeal}
-                                            onEdit={(item) =>
-                                                setDealForm({
-                                                    id: item.id,
-                                                    name: item.name,
-                                                    contact: item.contact,
-                                                    contact_name: item.contact_name,
-                                                    value: item.value,
-                                                    currency: item.currency,
-                                                    expected_close_date: item.expected_close_date || "",
-                                                    notes: item.notes || "",
-                                                })
-                                            }
-                                        />
-                                    ))
-                                )}
-                            </div>
-                        </div>
-                    ))}
+                            );
+                        })}
+                    </div>
                 </div>
             )}
 
@@ -440,6 +648,44 @@ export default function Pipeline() {
                                 onChange={(event) =>
                                     setDealForm({ ...dealForm, expected_close_date: event.target.value })
                                 }
+                            />
+                        </Field>
+                        <Field label="Notes" hint="What you agreed, what they asked for, what to do next.">
+                            <Textarea
+                                rows={3}
+                                value={dealForm.notes || ""}
+                                onChange={(event) => setDealForm({ ...dealForm, notes: event.target.value })}
+                                placeholder="Wants delivery before Diwali. Asked for a 5% discount on 500 units."
+                            />
+                        </Field>
+                    </form>
+                </Modal>
+            )}
+
+            {noteForm && (
+                <Modal
+                    title="Note"
+                    description={noteForm.name}
+                    onClose={() => setNoteForm(null)}
+                    footer={
+                        <>
+                            <Button variant="secondary" onClick={() => setNoteForm(null)}>
+                                Cancel
+                            </Button>
+                            <Button type="submit" form="deal-note-form" loading={busy}>
+                                Save note
+                            </Button>
+                        </>
+                    }
+                >
+                    <form id="deal-note-form" onSubmit={saveNote}>
+                        <Field label="What should you remember about this deal?">
+                            <Textarea
+                                autoFocus
+                                rows={6}
+                                value={noteForm.notes}
+                                onChange={(event) => setNoteForm({ ...noteForm, notes: event.target.value })}
+                                placeholder="Wants delivery before Diwali. Asked for a 5% discount on 500 units."
                             />
                         </Field>
                     </form>

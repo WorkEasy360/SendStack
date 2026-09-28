@@ -313,6 +313,13 @@ def activate(key, *, tenant, account, answers: dict, actor=None):
     # choosing is which documents it may use and what it does when they do
     # not cover the question.
     if creates == "KNOWLEDGE":
+        # This one preset switches the AI agent on, so it is behind the AI
+        # plan switch like every other way of doing that. The rest write an
+        # ordinary automation rule and are included on every plan.
+        from apps.subscriptions.services import feature_enabled, feature_message
+
+        if not feature_enabled(tenant, "ai_agent"):
+            raise PresetError(feature_message(tenant, "ai_agent"))
         return _activate_knowledge(tenant, answers), "KNOWLEDGE"
 
     body = (answers.get("message_body") or "").strip()

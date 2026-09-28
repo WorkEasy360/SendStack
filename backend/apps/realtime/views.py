@@ -14,10 +14,10 @@ from rest_framework.views import APIView
 
 from . import events
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 _TICKET_TTL_SECONDS = 60
-_TICKET_PREFIX = "multisender:rt-ticket:"
+_TICKET_PREFIX = "sendstack:rt-ticket:"
 
 # How long one stream is held open before the client is asked to reconnect.
 # A bounded lifetime keeps a worker thread from being owned forever by a tab

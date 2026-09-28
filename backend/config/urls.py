@@ -32,7 +32,7 @@ from apps.voice import webhooks as voice_webhooks
 
 def home(request):
     return JsonResponse({
-        "application": "MultiSender",
+        "application": "SendStack",
         "status": "running",
         "version": "1.0",
     })
@@ -41,7 +41,10 @@ def home(request):
 urlpatterns = [
     path("", home, name="home"),
 
-    path("admin/", admin.site.urls),
+    # Mount point is configurable (DJANGO_ADMIN_URL) so a deployment can move
+    # it off the path every scanner tries first. core.middleware.
+    # AdminSecurityMiddleware reads the same setting to know what to protect.
+    path(settings.DJANGO_ADMIN_URL, admin.site.urls),
 
     path("health/", include("apps.health.urls")),
 
@@ -95,6 +98,10 @@ urlpatterns = [
     path("api/v1/auth/", include("apps.accounts.urls")),
     path("api/v1/tenants/", include("apps.tenants.urls")),
     path("api/v1/billing/", include("apps.subscriptions.urls")),
+    # Payments sit under the same customer-facing prefix as the plans
+    # and usage they act on, with their own disjoint sub-paths.
+    path("api/v1/billing/", include("apps.billing.urls")),
+    path("api/v1/onboarding/", include("apps.onboarding.urls")),
     path("api/v1/whatsapp/", include("apps.whatsapp.urls")),
     path("api/v1/contacts/", include("apps.contacts.urls")),
     path("api/v1/templates/", include("apps.templates_app.urls")),
@@ -109,11 +116,37 @@ urlpatterns = [
     path("api/v1/tracking/", include("apps.tracking.urls")),
     path("api/v1/teams/", include("apps.teams.urls")),
     path("api/v1/ai/", include("apps.ai.urls")),
+    # The chatbot dashboard. No webhook of its own: inbound WhatsApp traffic
+    # already arrives at the per-account endpoint under /api/v1/whatsapp/,
+    # which is signature-verified and deduplicated, and a second inbound path
+    # would be a second thing to secure for no benefit.
+    path("api/v1/chatbot/", include("apps.chatbot.urls")),
     path("api/v1/voice/", include("apps.voice.urls")),
     path("api/v1/realtime/", include("apps.realtime.urls")),
     path("api/v1/leadgen/", include("apps.leadgen.urls")),
+    # The number filter and the group grabber: lookups through a linked
+    # number that produce contacts, never consent.
+    path("api/v1/leadtools/", include("apps.leadtools.urls")),
     path("api/v1/notifications/", include("apps.notifications.urls")),
     path("api/v1/reports/", include("apps.reports.urls")),
+    path("api/v1/support/", include("apps.support.urls")),
+    # Public: the documents have to be readable before somebody has an
+    # account, and the acceptance endpoints below them are authenticated.
+    path("api/v1/legal/", include("apps.legal.urls")),
+
+    # Settings -> Developer. Ordinary JWT-authenticated dashboard screens for
+    # managing API keys and webhook endpoints -- deliberately *not* reachable
+    # with an API key, because a key that could mint another key would make
+    # revoking one pointless.
+    path("api/v1/developer/", include("apps.publicapi.dashboard_urls")),
+
+    # **The public developer API.** Its own prefix rather than /api/v1/,
+    # which is already the SPA's and where campaigns, templates, contacts,
+    # media and reports are all taken. See apps/publicapi/urls.py.
+    #
+    # Authenticated only by API key, with its own error envelope, its own rate
+    # limits and its own OpenAPI document at /api/public/v1/openapi.json.
+    path("api/public/v1/", include("apps.publicapi.urls")),
 ]
 
 # Uploaded attachments are served by nginx in every deployed environment (see

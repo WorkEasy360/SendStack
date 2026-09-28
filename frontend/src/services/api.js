@@ -12,6 +12,31 @@ api.interceptors.request.use((config) => {
     if (token) {
         config.headers.Authorization = `Bearer ${token}`;
     }
+
+    // A file upload must not carry this instance's default JSON content type.
+    // Axios reads the header to decide what the body *is*: with
+    // "application/json" on it, a FormData body is quietly turned into
+    // JSON.stringify(formDataToJSON(data)) -- every File collapses to {} and
+    // the server is sent {"file":{}} with no file in it at all.
+    //
+    // The header has to be removed here rather than overridden at the call
+    // site, because it comes back on the retry. On the first flight axios
+    // deletes whatever content type was set so the browser can add the
+    // multipart boundary; the 401 handler below then replays that same config
+    // through this instance, the default is merged back in, and the body is
+    // serialised away. Access tokens live 15 minutes, so that retry is the
+    // common path rather than the rare one -- which is exactly why uploads
+    // failed intermittently rather than always.
+    //
+    // Deleting it leaves the browser to set "multipart/form-data" *with* the
+    // boundary, which is the only form of that header a server can parse.
+    if (typeof FormData !== "undefined" && config.data instanceof FormData) {
+        delete config.headers["Content-Type"];
+        delete config.headers["content-type"];
+        if (typeof config.headers.setContentType === "function") {
+            config.headers.setContentType(null);
+        }
+    }
     return config;
 });
 

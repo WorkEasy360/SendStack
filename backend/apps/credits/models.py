@@ -26,6 +26,15 @@ class CreditTransaction(models.Model):
     amount = models.PositiveIntegerField()
     type = models.CharField(max_length=20, choices=Type.choices)
     reference = models.CharField(max_length=255, blank=True)
+    # Idempotency handle for balance moves that a crashing/retrying worker
+    # could otherwise apply twice. `reference` is a human string that several
+    # rows legitimately share; this is unique. When set, the operation that
+    # created this row is "done" -- a second call with the same operation_id
+    # (a redelivered task, the recovery sweep finishing what a dead worker
+    # started, a duplicate delivery webhook) is a no-op. NULL on every row
+    # written before this existed and on operations that are not deduplicated
+    # (manual grants, transfers).
+    operation_id = models.CharField(max_length=255, null=True, blank=True, unique=True)
     balance_before = models.PositiveIntegerField()
     balance_after = models.PositiveIntegerField()
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")

@@ -10,16 +10,27 @@ turn (the WhatsApp agent). `converse` adds tool use and the current
 generation's thinking/effort controls, and is what the voice agent runs on --
 a call needs the model to *do* things (hang up, transfer, save a detail) and
 not merely say them.
+
+The request and response shapes this module speaks are the package's internal
+ones (see `base`), so there is nothing to translate here.
 """
 
-import json
 import logging
 import time
 
 import requests
 from django.conf import settings
 
-logger = logging.getLogger("multisender")
+# Re-exported: this module was the whole of the package before there was more
+# than one provider, and callers still import the shared vocabulary from here.
+from .base import AIProviderError, AIResponse, ToolCall, tool_result_block
+
+__all__ = [
+    "AIProviderError", "AIResponse", "ToolCall", "tool_result_block",
+    "complete", "converse", "supports_adaptive_thinking", "supports_sampling",
+]
+
+logger = logging.getLogger("sendstack")
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -43,10 +54,6 @@ _NO_SAMPLING_PREFIXES = (
 _ADAPTIVE_PREFIXES = _NO_SAMPLING_PREFIXES + ("claude-opus-4-6", "claude-sonnet-4-6")
 
 
-class AIProviderError(Exception):
-    """Raised when the model could not be reached or refused the request."""
-
-
 def supports_sampling(model: str) -> bool:
     """Whether `temperature` may be sent to this model at all."""
     return not (model or "").startswith(_NO_SAMPLING_PREFIXES)
@@ -55,39 +62,6 @@ def supports_sampling(model: str) -> bool:
 def supports_adaptive_thinking(model: str) -> bool:
     """Whether this model accepts `thinking: adaptive` and `output_config.effort`."""
     return (model or "").startswith(_ADAPTIVE_PREFIXES)
-
-
-class ToolCall:
-    """One tool the model asked for, already decoded."""
-
-    __slots__ = ("id", "name", "input")
-
-    def __init__(self, id, name, input):  # noqa: A002 - mirrors the API's own field names
-        self.id = id
-        self.name = name
-        self.input = input
-
-    def __repr__(self):
-        return f"ToolCall({self.name!r}, {self.input!r})"
-
-
-class AIResponse:
-    __slots__ = ("text", "input_tokens", "output_tokens", "latency_ms", "stop_reason", "tool_calls", "content")
-
-    def __init__(self, text, input_tokens=0, output_tokens=0, latency_ms=0, stop_reason="",
-                 tool_calls=None, content=None):
-        self.text = text
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-        self.latency_ms = latency_ms
-        self.stop_reason = stop_reason
-        #: Tool calls the model made this turn, in the order it made them.
-        self.tool_calls = tool_calls or []
-        #: The raw content blocks, to be echoed back as the assistant turn when
-        #: continuing a tool-use exchange. Rebuilding them from `.text` would
-        #: drop the tool_use blocks and break the pairing the API requires
-        #: between a tool_use and its tool_result.
-        self.content = content or []
 
 
 def _post(payload, api_key, timeout):
@@ -120,6 +94,10 @@ def _post(payload, api_key, timeout):
             detail = (response.json().get("error") or {}).get("message", "")
         except ValueError:
             detail = response.text[:200]
+        if response.status_code == 401:
+            # The single most common cause is a key from another vendor pasted
+            # into this field, and "invalid x-api-key" does not say so.
+            detail = f"{detail} (this provider is set to Anthropic, so it expects a key beginning sk-ant-)"
         raise AIProviderError(f"AI provider returned {response.status_code}: {detail}")
 
     try:
@@ -149,7 +127,7 @@ def _parse(data, latency_ms) -> AIResponse:
 
 
 def converse(*, api_key, model, system, messages, tools=None, max_tokens=400, temperature=None,
-             effort=None, timeout=None) -> AIResponse:
+             effort=None, timeout=None, base_url=None) -> AIResponse:
     """
     One turn of conversation, optionally with tools the model may call.
 
@@ -161,6 +139,10 @@ def converse(*, api_key, model, system, messages, tools=None, max_tokens=400, te
     `temperature` and `effort` are each dropped when the configured model does
     not accept them, so changing the model on the settings page can never turn
     a working agent into a 400.
+
+    `base_url` is accepted and ignored: Anthropic's endpoint is fixed, and the
+    registry passes this uniformly across providers so callers never have to
+    know which ones use it.
     """
     payload = {
         "model": model,
@@ -189,27 +171,10 @@ def converse(*, api_key, model, system, messages, tools=None, max_tokens=400, te
     return _parse(data, latency_ms)
 
 
-def complete(*, api_key, model, system, messages, max_tokens=400, temperature=0.2, timeout=None) -> AIResponse:
+def complete(*, api_key, model, system, messages, max_tokens=400, temperature=0.2, timeout=None,
+             base_url=None) -> AIResponse:
     """One turn of plain conversation, with no tools. See `converse`."""
     return converse(
         api_key=api_key, model=model, system=system, messages=messages,
         max_tokens=max_tokens, temperature=temperature, timeout=timeout,
     )
-
-
-def tool_result_block(tool_call, result, is_error=False) -> dict:
-    """
-    The user-turn block that answers one tool_use.
-
-    Every tool_use in an assistant turn must be answered, including the ones
-    that failed -- an unanswered call is a 400 on the next request, which on a
-    live call is a dropped call.
-    """
-    block = {
-        "type": "tool_result",
-        "tool_use_id": tool_call.id,
-        "content": result if isinstance(result, str) else json.dumps(result),
-    }
-    if is_error:
-        block["is_error"] = True
-    return block

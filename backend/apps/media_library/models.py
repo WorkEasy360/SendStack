@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db import models
 
 from core.media import DOCUMENT, IMAGE, VIDEO
+from core.uploads import safe_extension
 
 # Extension -> attachment kind. WhatsApp treats "anything that isn't a picture
 # or a clip" as a document, so DOCUMENT is the fallback rather than a rejection.
@@ -28,8 +29,13 @@ def classify(filename: str, content_type: str = "") -> str:
 def media_asset_upload_path(instance, filename):
     # A UUID stem keeps two uploads of "invoice.pdf" from colliding while the
     # original name is preserved separately for the WhatsApp download label.
-    extension = os.path.splitext(filename)[1].lower()[:16]
-    return f"message_media/tenant_{instance.tenant_id}/{uuid.uuid4().hex}{extension}"
+    #
+    # The extension goes through core.uploads.safe_extension rather than a bare
+    # splitext: this builds a path, and an extension is the one part of it an
+    # uploader still has any say over. Anything that is not a short run of
+    # letters and digits (a slash, "..", a control character, a second
+    # extension) becomes no extension at all rather than a path segment.
+    return f"message_media/tenant_{instance.tenant_id}/{uuid.uuid4().hex}{safe_extension(filename)}"
 
 
 class MediaAsset(models.Model):

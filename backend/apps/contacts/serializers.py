@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from core.uploads import UploadRejected, validate_upload
+
 from .models import Contact, ContactGroup, ContactImport, ContactSegment, ContactTag
 from .utils import normalize_phone
 
@@ -33,10 +35,30 @@ class ContactSerializer(serializers.ModelSerializer):
             "unsubscribed_at", "groups", "tags", "last_message_at", "created_at", "updated_at",
             "owner", "owner_username", "lifecycle_status", "lead_score", "score_band",
             "last_inbound_at", "last_outbound_at",
+            "marketing_consent", "consent_source", "consent_at", "consent_reference",
+            "whatsapp_status", "whatsapp_checked_at",
         )
+        # `subscribed` and every consent field are read here and written only
+        # through the dedicated actions (unsubscribe / resubscribe /
+        # set-consent), never through a plain PATCH.
+        #
+        # This is the hole the audit was looking for. While `subscribed` was
+        # writable, `PATCH /contacts/{id}/ {"subscribed": true}` silently
+        # re-enabled a contact who had replied STOP: no ConsentEvent, no
+        # `unsubscribed_at` cleared, nothing in the log to say it happened.
+        # A CRM sync, a bulk edit or an integration doing a read-modify-write
+        # of the whole object would do it by accident, because a GET returns
+        # `subscribed` and a PUT sends it straight back.
+        #
+        # Consent state now changes only where a consent record is written
+        # alongside it, so the flag and its evidence cannot come apart.
         read_only_fields = (
             "id", "unsubscribed_at", "last_message_at", "created_at", "updated_at",
             "lead_score", "score_band", "last_inbound_at", "last_outbound_at", "owner_username",
+            "subscribed", "marketing_consent", "consent_source", "consent_at", "consent_reference",
+            # Written only by the number filter (apps.leadtools), which is the
+            # one thing that has actually asked WhatsApp.
+            "whatsapp_status", "whatsapp_checked_at",
         )
 
     def validate_phone(self, value):
@@ -64,6 +86,7 @@ class ContactImportSerializer(serializers.ModelSerializer):
         model = ContactImport
         fields = (
             "id", "file", "status", "group_ids", "tag_ids", "column_mapping",
+            "consent_source", "consent_reference",
             "total_rows", "created_count", "updated_count", "skipped_count", "error_count",
             "errors", "created_at", "completed_at",
         )
@@ -73,11 +96,36 @@ class ContactImportSerializer(serializers.ModelSerializer):
         )
 
     def validate_file(self, value):
-        if not value.name.lower().endswith(".csv"):
-            raise serializers.ValidationError("Only .csv files are supported.")
         max_size = 10 * 1024 * 1024
         if value.size > max_size:
             raise serializers.ValidationError("File must be smaller than 10MB.")
+        # The extension alone is not evidence: this file is written under
+        # MEDIA_ROOT, which nginx serves back on this origin, so an HTML
+        # payload renamed to ".csv" would be a stored script if the bytes were
+        # never looked at. validate_upload checks that it really is text.
+        try:
+            validate_upload(value, allowed={".csv", ".xlsx"})
+        except UploadRejected as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+    def validate_consent_source(self, value):
+        """
+        Blank, or one of the recorded sources. Never a free-text claim.
+
+        A source somebody can type is a source nobody can audit -- the point of
+        the list is that "where did this consent come from" has a small set of
+        answers a reviewer recognises.
+        """
+        from .models import Contact
+
+        if not value:
+            return ""
+        value = value.upper()
+        if value not in Contact.ConsentSource.values:
+            raise serializers.ValidationError(
+                f"Choose one of: {', '.join(Contact.ConsentSource.values)}."
+            )
         return value
 
     def validate(self, attrs):
@@ -95,6 +143,7 @@ ALLOWED_SEGMENT_FIELDS = {
     "email": {"eq", "contains"},
     "country": {"eq"},
     "subscribed": {"eq"},
+    "marketing_consent": {"eq"},
     "tags": {"eq"},
     "groups": {"eq"},
 }
@@ -120,4 +169,56 @@ class ContactSegmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f"Unsupported operator '{operator}' for '{field}'.")
             if "value" not in rule:
                 raise serializers.ValidationError("Each filter needs a 'value'.")
+        return value
+
+
+class PasteParseSerializer(serializers.Serializer):
+    """
+    A block of pasted text to classify. Nothing is created by this request.
+
+    `default_country_code` is required in practice rather than in the schema:
+    a number pasted without one is reported as NO_COUNTRY_CODE instead of
+    being guessed at, and the screen asks for the code once rather than per
+    row. See apps/contacts/paste.py for why guessing would be worse than
+    refusing.
+    """
+
+    text = serializers.CharField(allow_blank=True, trim_whitespace=False)
+    default_country_code = serializers.CharField(required=False, allow_blank=True, default="", max_length=6)
+
+
+class PasteRowSerializer(serializers.Serializer):
+    """One row the reviewer has decided to keep."""
+
+    name = serializers.CharField(required=False, allow_blank=True, default="", max_length=150)
+    phone = serializers.CharField(max_length=32)
+
+
+class PasteImportSerializer(serializers.Serializer):
+    """
+    The reviewed rows, committed.
+
+    Takes the rows rather than the original text on purpose: what gets
+    imported is what the person saw and approved in the review table, not a
+    re-parse of the paste that might classify a line differently a minute
+    later. Every phone is re-validated server-side regardless -- the browser's
+    parse is a convenience, never the authority.
+    """
+
+    rows = PasteRowSerializer(many=True)
+    group_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    tag_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    consent_source = serializers.CharField(required=False, allow_blank=True, default="", max_length=20)
+    consent_reference = serializers.CharField(required=False, allow_blank=True, default="", max_length=120)
+
+    def validate_rows(self, value):
+        from .paste import MAX_LINES
+
+        if not value:
+            raise serializers.ValidationError("There is nothing to import.")
+        if len(value) > MAX_LINES:
+            raise serializers.ValidationError(
+                f"At most {MAX_LINES:,} contacts can be imported from a paste at once "
+                f"({len(value):,} given). Upload the rest as a CSV."
+            )
         return value

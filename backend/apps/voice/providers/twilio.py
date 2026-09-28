@@ -38,7 +38,7 @@ from .base import (
     VoiceProviderError,
 )
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 API_BASE = "https://api.twilio.com/2010-04-01"
 

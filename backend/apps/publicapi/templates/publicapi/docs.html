@@ -1,0 +1,769 @@
+{% comment %}
+The public API reference.
+
+Deliberately self-contained: no CDN, no build step, no JavaScript framework. A
+docs page that fails to render because a third-party script is blocked is a
+docs page that fails exactly when somebody is debugging a connectivity problem.
+The only JavaScript here is the language tab switcher, which degrades to
+"all five examples visible" if it never runs.
+{% endcomment %}<title>SendStack API Reference</title>
+<style>
+  :root {
+    --bg: #ffffff; --surface: #f8fafc; --border: #e2e8f0; --text: #0f172a;
+    --muted: #64748b; --accent: #0f766e; --accent-soft: #ccfbf1;
+    --code-bg: #0f172a; --code-text: #e2e8f0; --danger: #b91c1c; --warn: #92400e;
+    --warn-bg: #fef3c7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1120; --surface: #111827; --border: #1f2937; --text: #e5e7eb;
+      --muted: #94a3b8; --accent: #2dd4bf; --accent-soft: #134e4a;
+      --code-bg: #020617; --code-text: #e2e8f0; --danger: #fca5a5; --warn: #fcd34d;
+      --warn-bg: #422006;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  .wrap { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 48px; max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+  nav { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto; padding: 32px 0; }
+  nav a { display: block; color: var(--muted); text-decoration: none; padding: 4px 0; font-size: 14px; }
+  nav a:hover { color: var(--accent); }
+  nav .group { font-weight: 600; color: var(--text); margin-top: 18px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  main { padding: 32px 0 96px; min-width: 0; }
+  h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: -.02em; }
+  h2 { font-size: 22px; margin: 48px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); letter-spacing: -.01em; }
+  h3 { font-size: 16px; margin: 28px 0 8px; }
+  p, li { color: var(--text); }
+  .lede { color: var(--muted); font-size: 17px; margin-bottom: 24px; }
+  pre { background: var(--code-bg); color: var(--code-text); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  pre code { color: inherit; }
+  p code, li code, td code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .note { background: var(--surface); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; }
+  .warn { background: var(--warn-bg); border-left: 3px solid var(--warn); padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; }
+  .method { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; letter-spacing: .05em; margin-right: 8px; }
+  .get { background: var(--accent-soft); color: var(--accent); }
+  .post { background: #dcfce7; color: #166534; }
+  .del { background: #fee2e2; color: #991b1b; }
+  @media (prefers-color-scheme: dark) {
+    .post { background: #14532d; color: #86efac; } .del { background: #7f1d1d; color: #fecaca; }
+  }
+  .ep { font-family: ui-monospace, monospace; font-size: 14px; }
+  .tabs { display: flex; gap: 4px; margin: 16px 0 0; flex-wrap: wrap; }
+  .tabs button { background: var(--surface); border: 1px solid var(--border); color: var(--muted); padding: 5px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; }
+  .tabs button[aria-selected="true"] { background: var(--code-bg); color: var(--code-text); border-color: var(--code-bg); }
+  .tabs + .panels pre { border-radius: 0 8px 8px 8px; margin-top: 0; }
+  .scopes td:first-child, .errors td:first-child, .events td:first-child { white-space: nowrap; font-family: ui-monospace, monospace; font-size: 13px; }
+  @media (max-width: 860px) { .wrap { grid-template-columns: 1fr; gap: 0; } nav { position: static; max-height: none; border-bottom: 1px solid var(--border); } }
+</style>
+
+<div class="wrap">
+<nav>
+  <div class="group">Getting started</div>
+  <a href="#auth">Authentication</a>
+  <a href="#quickstart">Quick start</a>
+  <a href="#keys">API keys</a>
+  <a href="#scopes">Permissions</a>
+  <a href="#errors">Errors</a>
+  <a href="#ratelimits">Rate limits</a>
+  <a href="#idempotency">Idempotency</a>
+  <div class="group">Endpoints</div>
+  <a href="#health">Health &amp; diagnostics</a>
+  <a href="#send">Send a message</a>
+  <a href="#media">Media messages</a>
+  <a href="#status">Message status</a>
+  <a href="#templates">Templates</a>
+  <a href="#campaigns">Campaigns</a>
+  <a href="#accounts">Accounts</a>
+  <a href="#reports">Reports</a>
+  <div class="group">Events</div>
+  <a href="#webhooks">Webhooks</a>
+  <a href="#signing">Verifying signatures</a>
+  <a href="#inbound">Inbound messages</a>
+  <a href="#event-list">Event reference</a>
+  <div class="group">Reference</div>
+  <a href="#postman">Postman collection</a>
+  <a href="{{ schema_url }}">OpenAPI 3.1 spec</a>
+</nav>
+
+<main>
+<h1>SendStack Messaging API</h1>
+<p class="lede">
+  Send WhatsApp messages, run campaigns and receive delivery and reply events from
+  any application &mdash; a CRM, an ERP, a storefront, a mobile app or an AI agent.
+</p>
+
+<p><strong>Base URL</strong></p>
+<pre><code>{{ base_url }}</code></pre>
+
+<h2 id="quickstart">Quick start</h2>
+<p>From nothing to a delivered WhatsApp message. Each step is a real screen or a
+real request &mdash; there are no placeholders to work out.</p>
+<ol>
+  {% for step in quick_start %}<li><strong>{{ step.title }}</strong><br>{{ step.detail }}</li>
+  {% endfor %}
+</ol>
+
+<h2 id="auth">Authentication</h2>
+<p>Every request carries your API key as a bearer token.</p>
+<pre><code>Authorization: Bearer ss_live_7f3a91c24b8e0d5a91c37e6f2b840195cd7ae3f1
+Content-Type: application/json</code></pre>
+
+<div class="warn">
+  <strong>HTTPS only.</strong> The key travels in a header on every request. In
+  production, plaintext HTTP is refused with <code>HTTPS_REQUIRED</code> rather
+  than served &mdash; a refusal is the only signal that reaches you before the
+  key has leaked to every hop on the path.
+</div>
+
+<p>Check a key works before you build against it. <code>/health</code> needs no scope:</p>
+<pre><code>curl {{ base_url }}/health \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY"</code></pre>
+<pre><code>{
+  "success": true,
+  "api": "online",
+  "version": "v1",
+  "authenticated": true,
+  "workspace": { "id": 12, "name": "Acme Retail" },
+  "token": {
+    "name": "Production API",
+    "key": "ss_live_7f3a91c2\u2026",
+    "environment": "live",
+    "scopes": ["messages:send", "messages:status"],
+    "permissions": ["Send WhatsApp messages", "View message status"]
+  }
+}</code></pre>
+
+<h2 id="keys">API keys</h2>
+<p>Create keys in <strong>Settings &rarr; Developer &rarr; API Keys</strong>. A key looks like:</p>
+<pre><code>ss_live_7f3a91c2 4b8e0d5a91c37e6f2b840195cd7ae3f1
+└──┬───┘└───┬──┘ └──────────────┬─────────────────┘
+ env    prefix               secret</code></pre>
+<ul>
+  <li><code>ss_live_</code> keys send real messages. <code>ss_test_</code> keys are
+      refused by every send endpoint, so you can point a staging deployment at
+      production and find out by reading a 403.</li>
+  <li>The <strong>prefix</strong> is stored in clear and shown in the dashboard. Quote it in a support ticket.</li>
+  <li>The <strong>secret</strong> is stored only as a hash. It is shown once, at creation, and can never be retrieved again. Lost it? Rotate the key.</li>
+</ul>
+<p>Rotating issues a new key and <strong>revokes the old one immediately</strong>, with no
+grace period &mdash; rotation is what you do when you think a key leaked. If you need
+overlap, create a second key, migrate, then revoke the first.</p>
+
+<h2 id="scopes">Scopes</h2>
+<p>A key holds only the permissions you tick. There is no hierarchy and no wildcard:
+if an endpoint needs a scope the key does not hold, it answers
+<code>403 INSUFFICIENT_PERMISSION</code> and names what is missing.</p>
+<table class="scopes">
+  <tr><th>Scope</th><th>Allows</th></tr>
+  {% for scope, description in scopes %}<tr><td>{{ scope }}</td><td>{{ description }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2 id="errors">Errors</h2>
+<p>Every failure has the same shape. Branch on <code>error.code</code>, never on the message:
+codes are the contract and never change, messages are prose and are improved freely.</p>
+<pre><code>{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_CREDITS",
+    "message": "Not enough credits to send this message."
+  },
+  "request_id": "8f2c1ab94d7e4c1f"
+}</code></pre>
+<p>Quote <code>request_id</code> to support &mdash; it identifies this exact call in our logs.</p>
+<table class="errors">
+  <tr><th>Code</th><th>Meaning</th></tr>
+  {% for code, description in error_codes %}<tr><td>{{ code }}</td><td>{{ description }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2 id="ratelimits">Rate limits</h2>
+<p>Three independent buckets, per key. Every response carries the state of the
+bucket the request charged:</p>
+<pre><code>X-RateLimit-Limit: 120
+X-RateLimit-Remaining: 118
+X-RateLimit-Reset: 1767225660
+X-RateLimit-Bucket: requests_per_minute</code></pre>
+<table>
+  <tr><th>Bucket</th><th>Charged by</th><th>Protects</th></tr>
+  <tr><td><code>requests_per_minute</code></td><td>every call</td><td>the API tier</td></tr>
+  <tr><td><code>messages_per_minute</code></td><td>sends, and campaign starts in proportion to their recipients</td><td>the send workers</td></tr>
+  <tr><td><code>campaigns_per_day</code></td><td>campaign creation and starts</td><td>you, from a loop</td></tr>
+</table>
+<p>Exceeding one returns <code>429 RATE_LIMITED</code> with <code>Retry-After</code> in seconds.
+<code>X-RateLimit-Bucket</code> tells you <em>which</em> ceiling you hit &mdash; without it, a
+caller stopped by the message limit sees plenty of request budget left and cannot
+tell why it was cut off.</p>
+
+<h2 id="idempotency">Idempotency</h2>
+<p>Send <code>Idempotency-Key</code> on any <code>POST</code> that causes something
+irreversible. Retrying with the same key and the same body returns the stored
+response and sends nothing.</p>
+<pre><code>POST {{ base_url }}/messages/send
+Idempotency-Key: order-123-confirmation
+Authorization: Bearer ss_live_...</code></pre>
+<p>A replayed response carries <code>Idempotency-Replayed: true</code>.</p>
+<table>
+  <tr><th>Situation</th><th>Response</th></tr>
+  <tr><td>Same key, same body, first request finished</td><td>The stored response, verbatim. Nothing is sent.</td></tr>
+  <tr><td>Same key, same body, first request still running</td><td><code>409 IDEMPOTENCY_IN_PROGRESS</code>. Retry shortly.</td></tr>
+  <tr><td>Same key, <em>different</em> body</td><td><code>409 IDEMPOTENCY_CONFLICT</code>. Use a new key &mdash; this is almost always a bug in the caller.</td></tr>
+  <tr><td>The first request failed</td><td>The key is released. Retrying actually runs.</td></tr>
+</table>
+<p>Keys are remembered for 24 hours and are scoped to your workspace.</p>
+
+<h2 id="health">Health &amp; diagnostics</h2>
+
+<h3>GET /health</h3>
+<p>Reachability, plus whether the token you sent is good. Works <em>without</em> a
+credential, answering <code>"authenticated": false</code> rather than 401, so it
+doubles as an uptime check. An <em>invalid</em> token is still a 401 &mdash; a health
+check that returns 200 for a revoked key hides the only thing it was asked about.</p>
+<pre><code>curl {{ base_url }}/health</code></pre>
+<pre><code>{ "success": true, "api": "online", "authenticated": false }</code></pre>
+
+<h3>GET /diagnostics</h3>
+<p>Every link a send depends on, checked and named separately. Use it to tell
+&ldquo;my token is wrong&rdquo; apart from &ldquo;my WhatsApp number is disconnected&rdquo;
+&mdash; the two need completely different fixes and a single failure message
+cannot say which. Sends nothing and reserves nothing. Needs no scope.</p>
+<pre><code>curl {{ base_url }}/diagnostics \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY"</code></pre>
+<pre><code>{
+  "success": true,
+  "ready_to_send": false,
+  "summary": "No active WhatsApp account is available for this token.",
+  "checks": [
+    { "name": "authentication",     "label": "API token",           "status": "pass" },
+    { "name": "permissions",        "label": "Send permission",     "status": "pass" },
+    { "name": "workspace",          "label": "Workspace",           "status": "pass" },
+    { "name": "whatsapp_connection","label": "WhatsApp connection", "status": "fail",
+      "detail": "No active WhatsApp account is available for this token." },
+    { "name": "credits",            "label": "Credits",             "status": "pass",
+      "available": 1420 }
+  ]
+}</code></pre>
+
+<h2 id="send">Send a message</h2>
+<p><span class="method post">POST</span><span class="ep">/messages/send</span> &nbsp;<code>messages:send</code></p>
+<p>Returns <strong>202 Accepted</strong>, not 200. The message is queued; the provider call
+happens in a worker. Poll <a href="#status">the status endpoint</a> or subscribe to
+<code>message.sent</code> to learn it actually went out.</p>
+
+<div class="tabs" role="tablist" data-group="send">
+  <button role="tab" aria-selected="true" data-lang="curl">curl</button>
+  <button role="tab" aria-selected="false" data-lang="python">Python</button>
+  <button role="tab" aria-selected="false" data-lang="js">JavaScript</button>
+  <button role="tab" aria-selected="false" data-lang="php">PHP</button>
+  <button role="tab" aria-selected="false" data-lang="csharp">C#</button>
+</div>
+<div class="panels" data-group="send">
+<pre data-lang="curl"><code>curl -X POST {{ base_url }}/messages/send \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-123-message-1" \
+  -d '{
+    "channel": "whatsapp",
+    "account_id": "account_3",
+    "to": "919999999999",
+    "type": "text",
+    "text": "Hello from my application"
+  }'</code></pre>
+<pre data-lang="python" hidden><code>import os, requests
+
+response = requests.post(
+    "{{ base_url }}/messages/send",
+    headers={
+        "Authorization": f"Bearer {os.environ['SENDSTACK_API_KEY']}",
+        "Idempotency-Key": "order-123-message-1",
+    },
+    json={
+        "channel": "whatsapp",
+        "account_id": "account_3",
+        "to": "919999999999",
+        "type": "text",
+        "text": "Hello from my application",
+    },
+    timeout=15,
+)
+response.raise_for_status()
+print(response.json()["message_id"])</code></pre>
+<pre data-lang="js" hidden><code>const response = await fetch("{{ base_url }}/messages/send", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${process.env.SENDSTACK_API_KEY}`,
+    "Content-Type": "application/json",
+    "Idempotency-Key": "order-123-message-1",
+  },
+  body: JSON.stringify({
+    channel: "whatsapp",
+    account_id: "account_3",
+    to: "919999999999",
+    type: "text",
+    text: "Hello from my application",
+  }),
+});
+
+const result = await response.json();
+if (!result.success) throw new Error(result.error.code);
+console.log(result.message_id);</code></pre>
+<pre data-lang="php" hidden><code>&lt;?php
+$payload = json_encode([
+    "channel"    =&gt; "whatsapp",
+    "account_id" =&gt; "account_3",
+    "to"         =&gt; "919999999999",
+    "type"       =&gt; "text",
+    "text"       =&gt; "Hello from my application",
+]);
+
+$ch = curl_init("{{ base_url }}/messages/send");
+curl_setopt_array($ch, [
+    CURLOPT_POST           =&gt; true,
+    CURLOPT_RETURNTRANSFER =&gt; true,
+    CURLOPT_POSTFIELDS     =&gt; $payload,
+    CURLOPT_HTTPHEADER     =&gt; [
+        "Authorization: Bearer " . getenv("SENDSTACK_API_KEY"),
+        "Content-Type: application/json",
+        "Idempotency-Key: order-123-message-1",
+    ],
+]);
+
+$result = json_decode(curl_exec($ch), true);
+curl_close($ch);
+
+if (!$result["success"]) {
+    throw new RuntimeException($result["error"]["code"]);
+}
+echo $result["message_id"];</code></pre>
+<pre data-lang="csharp" hidden><code>using System.Net.Http.Json;
+
+var http = new HttpClient();
+http.DefaultRequestHeaders.Authorization =
+    new("Bearer", Environment.GetEnvironmentVariable("SENDSTACK_API_KEY"));
+
+var request = new HttpRequestMessage(HttpMethod.Post, "{{ base_url }}/messages/send")
+{
+    Content = JsonContent.Create(new
+    {
+        channel = "whatsapp",
+        account_id = "account_3",
+        to = "919999999999",
+        type = "text",
+        text = "Hello from my application",
+    }),
+};
+request.Headers.Add("Idempotency-Key", "order-123-message-1");
+
+var response = await http.SendAsync(request);
+var result = await response.Content.ReadFromJsonAsync&lt;JsonElement&gt;();
+Console.WriteLine(result.GetProperty("message_id").GetString());</code></pre>
+</div>
+
+<p><strong>Response</strong></p>
+<pre><code>{
+  "success": true,
+  "message_id": "msg_918",
+  "status": "queued",
+  "channel": "whatsapp",
+  "account_id": "account_3",
+  "recipient": "+919999999999"
+}</code></pre>
+
+<div class="note">
+  <strong>Omit <code>account_id</code></strong> and SendStack picks a connected number
+  for you. You never need to know whether the message goes out over a QR-linked
+  device or the WhatsApp Cloud API &mdash; that is the router's decision, and it can
+  change without your integration changing.
+</div>
+
+<h3>Using a template</h3>
+<pre><code>{
+  "to": "919999999999",
+  "template_id": "welcome_customer",
+  "variables": { "name": "Aman", "order_id": "ORD123" }
+}</code></pre>
+<p><code>template_id</code> accepts either the id (<code>tpl_7</code>) or the template's
+name. Prefer the name: it survives a database restore and reads better in your code.</p>
+
+<h3>Marketing vs service</h3>
+<p>Sends default to <code>"kind": "marketing"</code>, which respects the workspace's
+quiet hours. Pass <code>"kind": "service"</code> for something the customer is waiting
+on &mdash; an OTP, an order update, a reply. Service messages skip quiet hours.
+<strong>Neither ever bypasses an opt-out.</strong></p>
+
+<h2 id="media">Media messages</h2>
+<p>Set <code>type</code> and give a publicly fetchable <code>media_url</code>:</p>
+<pre><code>{
+  "channel": "whatsapp",
+  "account_id": "account_3",
+  "to": "919999999999",
+  "type": "image",
+  "media_url": "https://example.com/receipt.png",
+  "caption": "Your receipt"
+}</code></pre>
+<p>Supported types: <code>image</code>, <code>video</code>, <code>document</code>,
+<code>pdf</code>, <code>audio</code>.</p>
+
+<h3>No public URL? Upload the bytes.</h3>
+<p><span class="method post">POST</span><span class="ep">/media</span> &nbsp;<code>media:upload</code></p>
+<pre><code>curl -X POST {{ base_url }}/media \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY" \
+  -F "file=@invoice.pdf"</code></pre>
+<pre><code>{ "success": true, "url": "https://.../media/assets/9f3c.pdf", "kind": "DOCUMENT" }</code></pre>
+<p>Pass that <code>url</code> straight back as <code>media_url</code>.</p>
+
+<h2 id="status">Message status</h2>
+<p><span class="method get">GET</span><span class="ep">/messages/{id}</span> &nbsp;<code>messages:status</code></p>
+<pre><code>curl {{ base_url }}/messages/msg_918 \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY"</code></pre>
+<pre><code>{
+  "success": true,
+  "message_id": "msg_918",
+  "status": "delivered",
+  "channel": "whatsapp",
+  "recipient": "+919999999999",
+  "created_at": "2026-09-03T10:14:02Z",
+  "updated_at": "2026-09-03T10:14:09Z"
+}</code></pre>
+<table>
+  <tr><th>Status</th><th>Meaning</th></tr>
+  <tr><td><code>queued</code></td><td>Accepted, waiting for a worker.</td></tr>
+  <tr><td><code>processing</code></td><td>Being handed to WhatsApp now.</td></tr>
+  <tr><td><code>sent</code></td><td>WhatsApp accepted it.</td></tr>
+  <tr><td><code>delivered</code></td><td>It reached the recipient's device.</td></tr>
+  <tr><td><code>read</code></td><td>The recipient opened it.</td></tr>
+  <tr><td><code>failed</code></td><td>It will not be delivered. See <code>failure_reason</code>.</td></tr>
+  <tr><td><code>cancelled</code></td><td>Its campaign was cancelled before it went out.</td></tr>
+</table>
+<div class="note">
+  Prefer <a href="#webhooks">webhooks</a> to polling. Every status change is pushed
+  to your endpoint the moment it happens.
+</div>
+
+<h2 id="templates">Templates</h2>
+<table>
+  <tr><th>Endpoint</th><th>Scope</th></tr>
+  <tr><td><span class="method get">GET</span><span class="ep">/templates</span></td><td><code>templates:read</code></td></tr>
+  <tr><td><span class="method get">GET</span><span class="ep">/templates/{id}</span></td><td><code>templates:read</code></td></tr>
+  <tr><td><span class="method post">POST</span><span class="ep">/templates</span></td><td><code>templates:write</code></td></tr>
+  <tr><td><span class="method post">PUT</span><span class="ep">/templates/{id}</span></td><td><code>templates:write</code></td></tr>
+  <tr><td><span class="method del">DELETE</span><span class="ep">/templates/{id}</span></td><td><code>templates:write</code></td></tr>
+</table>
+<p>Variables use either syntax &mdash; <code>[Name]</code> or <code>{% templatetag openvariable %}name{% templatetag closevariable %}</code>
+&mdash; and both resolve against the same context.</p>
+<pre><code>curl -X POST {{ base_url }}/templates \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "welcome_customer",
+    "body": "Hi {% templatetag openvariable %}name{% templatetag closevariable %}, your order {% templatetag openvariable %}order_id{% templatetag closevariable %} is confirmed.",
+    "variables": { "name": "there" }
+  }'</code></pre>
+<p><code>variables</code> holds <em>fallbacks</em>: what to substitute when a send does not
+supply that variable. A template used by a campaign cannot be deleted &mdash; set
+<code>is_active: false</code> instead.</p>
+
+<h2 id="campaigns">Campaigns</h2>
+<p><span class="method post">POST</span><span class="ep">/campaigns</span> &nbsp;<code>campaigns:create</code></p>
+<pre><code>curl -X POST {{ base_url }}/campaigns \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "January Promotion",
+    "channel": "whatsapp",
+    "account_id": "account_3",
+    "template_id": "promo_template",
+    "recipients": [
+      { "phone": "919999999999", "variables": { "name": "Aman" } },
+      { "phone": "918888888888", "variables": { "name": "Priya" } }
+    ]
+  }'</code></pre>
+<p>Creating and starting are two calls on purpose, so a wrongly-built audience is
+caught before it is sent. Pass <code>"start": true</code> to skip the check.</p>
+<table>
+  <tr><th>Endpoint</th><th>Scope</th></tr>
+  <tr><td><span class="method post">POST</span><span class="ep">/campaigns/{id}/start</span></td><td><code>campaigns:send</code></td></tr>
+  <tr><td><span class="method post">POST</span><span class="ep">/campaigns/{id}/pause</span></td><td><code>campaigns:send</code></td></tr>
+  <tr><td><span class="method post">POST</span><span class="ep">/campaigns/{id}/resume</span></td><td><code>campaigns:send</code></td></tr>
+  <tr><td><span class="method post">POST</span><span class="ep">/campaigns/{id}/cancel</span></td><td><code>campaigns:cancel</code></td></tr>
+  <tr><td><span class="method get">GET</span><span class="ep">/campaigns/{id}</span></td><td><code>campaigns:read</code></td></tr>
+  <tr><td><span class="method get">GET</span><span class="ep">/campaigns/{id}/results</span></td><td><code>campaigns:read</code></td></tr>
+</table>
+<p><code>campaigns:cancel</code> is separate from <code>campaigns:send</code> so an
+operations tool can stop a send without being able to start one.</p>
+<p>Recipients are matched to contacts in your workspace, and created if they are new.
+Per-recipient <code>variables</code> are stored on the contact, so they work exactly like
+a column in an uploaded CSV.</p>
+
+<h2 id="accounts">Accounts</h2>
+<p><span class="method get">GET</span><span class="ep">/accounts</span> &nbsp;<code>accounts:read</code></p>
+<pre><code>{
+  "success": true,
+  "accounts": [
+    {
+      "id": "account_3",
+      "name": "Sales line",
+      "channel": "whatsapp",
+      "provider": "qr_bridge",
+      "status": "connected",
+      "phone": "+919162353602"
+    }
+  ]
+}</code></pre>
+<p>Send only from accounts whose <code>status</code> is <code>connected</code>. Subscribe to
+<code>account.connected</code> and <code>account.disconnected</code> to keep your own view
+current without polling.</p>
+<div class="note">
+  This endpoint never exposes provider credentials, session state, pairing data or
+  authentication keys of any kind. There is no API path to them.
+</div>
+
+<h2 id="reports">Reports</h2>
+<p><span class="method get">GET</span><span class="ep">/reports/summary</span> &nbsp;<code>reports:read</code></p>
+<pre><code>curl "{{ base_url }}/reports/summary?range=last_30_days"   -H "Authorization: Bearer $SENDSTACK_API_KEY"</code></pre>
+<pre><code>{
+  "success": true,
+  "range": "last_30_days",
+  "messages": { "total": 4210, "sent": 4180, "delivered": 4011, "read": 2874, "failed": 30, "received": 611 },
+  "rates": { "delivery": 95.9, "read": 68.7 },
+  "campaigns": { "total": 12, "active": 1 },
+  "accounts": { "total": 3, "connected": 2 },
+  "contacts": { "total": 5104 }
+}</code></pre>
+<p><span class="method get">GET</span><span class="ep">/reports/daily</span> returns one row per day
+over the same window, for charting.</p>
+<p><code>range</code> is one of <code>today</code>, <code>yesterday</code>,
+<code>last_7_days</code>, <code>last_30_days</code> or <code>custom</code> (with
+<code>start_date</code> and <code>end_date</code>). Omit it for all time. An unrecognised
+value is a 400 rather than a silent fall-through to all time.</p>
+
+<h2 id="webhooks">Webhooks</h2>
+<p>Register an endpoint and we push events to it instead of you polling.</p>
+<pre><code>curl -X POST {{ base_url }}/webhooks \
+  -H "Authorization: Bearer $SENDSTACK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Order service",
+    "url": "https://your-app.com/webhooks/sendstack",
+    "events": ["message.delivered", "message.failed", "message.received"]
+  }'</code></pre>
+<p>The response carries the signing <code>secret</code> <strong>once</strong>. Store it now.
+Omit <code>events</code> to receive everything.</p>
+
+<p>Each delivery looks like this:</p>
+<pre><code>POST https://your-app.com/webhooks/sendstack
+X-SendStack-Signature: sha256=8c4f...
+X-SendStack-Timestamp: 1767225600
+X-SendStack-Event: message.delivered
+X-SendStack-Delivery: evt_9c1f4a...
+
+{
+  "id": "evt_9c1f4a...",
+  "event": "message.delivered",
+  "timestamp": "2026-09-03T10:14:09Z",
+  "data": {
+    "message_id": "msg_918",
+    "recipient": "+919999999999",
+    "status": "delivered",
+    "account_id": 3
+  }
+}</code></pre>
+
+<h3>Delivery guarantees</h3>
+<ul>
+  <li>Answer with any <strong>2xx</strong>, quickly. Acknowledge first, process asynchronously.</li>
+  <li>Failures retry 5 times with jittered exponential backoff (roughly 10s &rarr; 10 minutes).</li>
+  <li>A <strong>4xx</strong> other than 408/429 is treated as permanent and is not retried &mdash; your URL is wrong, and retrying hides that.</li>
+  <li>Delivery is <strong>at-least-once</strong>. Deduplicate on <code>id</code> (equivalently <code>X-SendStack-Delivery</code>), which is stable across retries.</li>
+  <li>An endpoint that fails 20 deliveries in a row is disabled, visibly, in the dashboard.</li>
+</ul>
+
+<h2 id="signing">Verifying signatures</h2>
+<p>Compute <code>HMAC-SHA256</code> over <code>"{timestamp}.{raw request body}"</code> using
+your signing secret, and compare in constant time. <strong>Use the raw bytes</strong>,
+before any JSON parsing &mdash; re-serialising changes them.</p>
+
+<div class="tabs" role="tablist" data-group="verify">
+  <button role="tab" aria-selected="true" data-lang="python">Python</button>
+  <button role="tab" aria-selected="false" data-lang="js">JavaScript</button>
+  <button role="tab" aria-selected="false" data-lang="php">PHP</button>
+  <button role="tab" aria-selected="false" data-lang="csharp">C#</button>
+</div>
+<div class="panels" data-group="verify">
+<pre data-lang="python"><code>import hashlib, hmac, time
+
+def verify(raw_body: bytes, headers, secret: str, tolerance=300) -> bool:
+    timestamp = headers.get("X-SendStack-Timestamp", "")
+    presented = headers.get("X-SendStack-Signature", "")
+    try:
+        sent_at = int(timestamp)
+    except ValueError:
+        return False
+
+    # Replay protection. Without it a captured delivery can be resent forever.
+    if abs(time.time() - sent_at) &gt; tolerance:
+        return False
+
+    signed = f"{sent_at}.".encode() + raw_body
+    expected = "sha256=" + hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, presented)</code></pre>
+<pre data-lang="js" hidden><code>import crypto from "node:crypto";
+
+export function verify(rawBody, headers, secret, tolerance = 300) {
+  const sentAt = Number(headers["x-sendstack-timestamp"]);
+  const presented = headers["x-sendstack-signature"] || "";
+  if (!Number.isFinite(sentAt)) return false;
+
+  // Replay protection.
+  if (Math.abs(Date.now() / 1000 - sentAt) &gt; tolerance) return false;
+
+  const signed = Buffer.concat([Buffer.from(`${sentAt}.`), rawBody]);
+  const expected =
+    "sha256=" + crypto.createHmac("sha256", secret).update(signed).digest("hex");
+
+  const a = Buffer.from(expected);
+  const b = Buffer.from(presented);
+  return a.length === b.length &amp;&amp; crypto.timingSafeEqual(a, b);
+}</code></pre>
+<pre data-lang="php" hidden><code>&lt;?php
+function sendstack_verify(string $rawBody, array $headers, string $secret, int $tolerance = 300): bool
+{
+    $sentAt    = (int) ($headers["X-SendStack-Timestamp"] ?? 0);
+    $presented = $headers["X-SendStack-Signature"] ?? "";
+
+    // Replay protection.
+    if ($sentAt === 0 || abs(time() - $sentAt) &gt; $tolerance) {
+        return false;
+    }
+
+    $expected = "sha256=" . hash_hmac("sha256", $sentAt . "." . $rawBody, $secret);
+    return hash_equals($expected, $presented);
+}</code></pre>
+<pre data-lang="csharp" hidden><code>using System.Security.Cryptography;
+using System.Text;
+
+public static bool Verify(byte[] rawBody, IHeaderDictionary headers, string secret, int tolerance = 300)
+{
+    if (!long.TryParse(headers["X-SendStack-Timestamp"], out var sentAt)) return false;
+    var presented = headers["X-SendStack-Signature"].ToString();
+
+    // Replay protection.
+    var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    if (Math.Abs(now - sentAt) &gt; tolerance) return false;
+
+    var prefix = Encoding.UTF8.GetBytes($"{sentAt}.");
+    var signed = new byte[prefix.Length + rawBody.Length];
+    Buffer.BlockCopy(prefix, 0, signed, 0, prefix.Length);
+    Buffer.BlockCopy(rawBody, 0, signed, prefix.Length, rawBody.Length);
+
+    using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+    var expected = "sha256=" + Convert.ToHexString(hmac.ComputeHash(signed)).ToLowerInvariant();
+
+    return CryptographicOperations.FixedTimeEquals(
+        Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(presented));
+}</code></pre>
+</div>
+
+<div class="warn">
+  <strong>The timestamp is inside the signature, not merely beside it.</strong> If it
+  were only a header, anyone replaying a captured delivery could rewrite it to
+  <em>now</em> and the signature would still verify. Reject anything older than about
+  five minutes.
+</div>
+
+<h2 id="inbound">Inbound messages</h2>
+<p>When a contact writes to you, you get <code>message.received</code>:</p>
+<pre><code>{
+  "event": "message.received",
+  "data": {
+    "message_id": "msg_1204",
+    "from": "+919999999999",
+    "account_id": 3,
+    "type": "text",
+    "text": "Hello",
+    "contact_id": 88,
+    "conversation_id": 12,
+    "timestamp": "2026-09-03T10:20:41Z"
+  }
+}</code></pre>
+
+<p>When they choose one of the options you offered, you get <code>button.clicked</code>
+<em>instead</em> &mdash; never both:</p>
+<pre><code>{
+  "event": "button.clicked",
+  "data": {
+    "message_id": "msg_1205",
+    "from": "+919999999999",
+    "button_id": "interested",
+    "button_text": "Interested",
+    "interaction_type": "native_button"
+  }
+}</code></pre>
+<div class="note">
+  <strong><code>interaction_type</code> tells you how they chose.</strong> WhatsApp reserves
+  tappable buttons for the Cloud API, so on a QR-linked number the options are sent
+  as a numbered list and the customer replies &ldquo;2&rdquo;. SendStack resolves that
+  back to the same <code>button_id</code>, so your integration handles both identically
+  &mdash; but <code>numbered_fallback</code> vs <code>native_button</code> is there when you
+  want to know.
+</div>
+
+<h2 id="event-list">Event reference</h2>
+<table class="events">
+  <tr><th>Event</th><th>Sent when</th></tr>
+  {% for event, description in events %}<tr><td>{{ event }}</td><td>{{ description }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2 id="postman">Postman collection</h2>
+<p>Every endpoint on this page as importable requests, generated from the same
+OpenAPI document &mdash; so nothing in it points at a path that does not exist.</p>
+<pre><code>{{ postman_url }}</code></pre>
+<p>In Postman, choose <strong>Import &rarr; Link</strong> and paste that URL. Then create an
+environment with these variables:</p>
+<table>
+  <tr><th>Variable</th><th>Value</th></tr>
+  <tr><td><code>base_url</code></td><td><code>{{ base_url }}</code></td></tr>
+  <tr><td><code>api_token</code></td><td>your API key</td></tr>
+  <tr><td><code>phone</code></td><td>a recipient, digits only, e.g. <code>919876543210</code></td></tr>
+  <tr><td><code>template_name</code></td><td>a template id, e.g. <code>tpl_12</code></td></tr>
+</table>
+<p>Every request in the collection uses <code>{% templatetag openvariable %}base_url{% templatetag closevariable %}</code>
+and authenticates with <code>Authorization: Bearer {% templatetag openvariable %}api_token{% templatetag closevariable %}</code>,
+so switching deployment or rotating a key is one edit rather than forty. Signed-in
+customers can also download the collection <em>and</em> a pre-filled environment from
+<strong>Developer &rarr; Postman</strong>.</p>
+
+<h2>Machine-readable spec</h2>
+<p>The full OpenAPI 3.1 document, for generating a client or importing into Postman
+or Insomnia:</p>
+<pre><code>{{ schema_url }}</code></pre>
+
+</main>
+</div>
+
+<script>
+  // Progressive enhancement: without this every example stays visible, which is
+  // worse-looking and still perfectly usable.
+  document.querySelectorAll('.tabs').forEach(function (tabs) {
+    var group = tabs.dataset.group;
+    var panels = document.querySelector('.panels[data-group="' + group + '"]');
+    tabs.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-lang]');
+      if (!button) return;
+      tabs.querySelectorAll('button').forEach(function (other) {
+        other.setAttribute('aria-selected', String(other === button));
+      });
+      panels.querySelectorAll('pre[data-lang]').forEach(function (pre) {
+        pre.hidden = pre.dataset.lang !== button.dataset.lang;
+      });
+    });
+  });
+</script>

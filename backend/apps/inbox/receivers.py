@@ -9,7 +9,7 @@ from apps.whatsapp.signals import webhook_event_stored
 from .services import record_inbound_message
 from .signals import inbound_message_recorded
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @receiver(webhook_event_stored)

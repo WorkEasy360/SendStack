@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import axios from "axios";
 import api from "../services/api";
 import { applyBrandColor } from "../utils/brandColor";
+import { useDarkMode } from "../utils/theme";
 
 /**
  * The brand this installation is wearing.
@@ -17,7 +18,7 @@ import { applyBrandColor } from "../utils/brandColor";
  */
 
 const DEFAULTS = {
-    product_name: "MultiSender",
+    product_name: "SendStack",
     logo_url: "",
     primary_color: "#059669",
     support_email: "",
@@ -62,9 +63,12 @@ export function BrandingProvider({ children }) {
 
     // Colour is a document-level concern (it drives every `brand-` utility),
     // and the name is what the browser tab says.
+    // Dark mode derives the tints and text steps from this same colour, so
+    // the ramp is re-applied when the theme flips.
+    const dark = useDarkMode();
     useEffect(() => {
-        applyBrandColor(branding.primary_color);
-    }, [branding.primary_color]);
+        applyBrandColor(branding.primary_color, dark);
+    }, [branding.primary_color, dark]);
 
     useEffect(() => {
         document.title = branding.product_name || DEFAULTS.product_name;

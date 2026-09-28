@@ -7,6 +7,18 @@ import {
     Settings2,
 } from "lucide-react";
 import api, { apiErrorMessage } from "../../services/api";
+import {
+    AI_PROVIDERS,
+    BASE_URL_PLACEHOLDER,
+    FREEFORM_PROVIDERS,
+    KEY_HINT,
+    KEY_PLACEHOLDER,
+    MODEL_SUGGESTIONS,
+    baseUrlProblem,
+    modelForProvider,
+    modelNameProblem,
+    modelOptions,
+} from "../../constants/aiProviders";
 import Alert from "../../components/ui/Alert";
 import Badge, { StatusBadge } from "../../components/ui/Badge";
 import Button from "../../components/ui/Button";
@@ -148,6 +160,14 @@ function AgentTab({ onSaved }) {
     }, []);
 
     const update = (patch) => setConfig((current) => ({ ...current, ...patch }));
+
+    // The model goes with the provider: the two vendors' names are not
+    // interchangeable, and a stale one here means a dropped call rather than
+    // a red field.
+    const switchProvider = (provider) => update({ model_provider: provider, model: modelForProvider(provider) });
+
+    const modelProblem = config ? modelNameProblem(config.model_provider, config.model) : "";
+    const urlProblem = config ? baseUrlProblem(config.model_provider, config.base_url) : "";
 
     const save = async () => {
         setSaving(true);
@@ -360,7 +380,7 @@ function AgentTab({ onSaved }) {
                     <Input
                         value={config.speech_hints}
                         onChange={(event) => update({ speech_hints: event.target.value })}
-                        placeholder="MultiSender, Ravi, Bandra, invoice"
+                        placeholder="SendStack, Ravi, Bandra, invoice"
                     />
                 </Field>
 
@@ -405,13 +425,50 @@ function AgentTab({ onSaved }) {
                     />
                 </Field>
 
+                <Field label="Provider" hint="Who bills you and whose key this is.">
+                    <Select
+                        value={config.model_provider}
+                        onChange={(event) => switchProvider(event.target.value)}
+                    >
+                        {AI_PROVIDERS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </Select>
+                </Field>
+
                 <div className="grid sm:grid-cols-2 gap-x-4">
-                    <Field label="Model">
-                        <Select value={config.model} onChange={(event) => update({ model: event.target.value })}>
-                            <option value="claude-opus-5">Claude Opus 5 — most capable</option>
-                            <option value="claude-sonnet-5">Claude Sonnet 5 — balanced</option>
-                            <option value="claude-haiku-4-5">Claude Haiku 4.5 — fastest</option>
-                        </Select>
+                    <Field label="Model" error={modelProblem}>
+                        {FREEFORM_PROVIDERS.includes(config.model_provider) ? (
+                            <>
+                                {/* Free text, not a list: neither OpenRouter nor a custom
+                                    endpoint's own models are a list this codebase can keep
+                                    current, and the API takes any name. */}
+                                <Input
+                                    list="voice-agent-models"
+                                    value={config.model}
+                                    onChange={(event) => update({ model: event.target.value })}
+                                    placeholder={
+                                        config.model_provider === "CUSTOM"
+                                            ? "gpt-4o, llama3.3, deepseek-chat…"
+                                            : "anthropic/claude-sonnet-4.5"
+                                    }
+                                    invalid={Boolean(modelProblem)}
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                />
+                                <datalist id="voice-agent-models">
+                                    {(MODEL_SUGGESTIONS[config.model_provider] || []).map((option) => (
+                                        <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                </datalist>
+                            </>
+                        ) : (
+                            <Select value={config.model} onChange={(event) => update({ model: event.target.value })}>
+                                {modelOptions(config.model_provider, config.model).map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                            </Select>
+                        )}
                     </Field>
 
                     <Field
@@ -426,12 +483,29 @@ function AgentTab({ onSaved }) {
                     </Field>
                 </div>
 
+                {config.model_provider === "CUSTOM" && (
+                    <Field
+                        label="Base URL"
+                        error={urlProblem}
+                        hint="The OpenAI-compatible endpoint to send requests to — everything up to (not including) /chat/completions."
+                    >
+                        <Input
+                            value={config.base_url || ""}
+                            onChange={(event) => update({ base_url: event.target.value })}
+                            placeholder={BASE_URL_PLACEHOLDER}
+                            invalid={Boolean(urlProblem)}
+                            autoComplete="off"
+                            spellCheck={false}
+                        />
+                    </Field>
+                )}
+
                 <Field
                     label="API key"
                     hint={
                         config.has_api_key
                             ? "A key is stored. Type a new one to replace it."
-                            : "Your own Anthropic key. Leave blank to use the deployment's."
+                            : `${KEY_HINT[config.model_provider] || ""} Leave blank to use the deployment's.`
                     }
                 >
                     <div className="flex gap-2">
@@ -439,7 +513,11 @@ function AgentTab({ onSaved }) {
                             type="password"
                             value={secrets.api_key}
                             onChange={(event) => setSecrets({ ...secrets, api_key: event.target.value })}
-                            placeholder={config.has_api_key ? "••••••••••••••••" : "sk-ant-…"}
+                            placeholder={
+                                config.has_api_key
+                                    ? "••••••••••••••••"
+                                    : KEY_PLACEHOLDER[config.model_provider] || ""
+                            }
                             autoComplete="off"
                         />
                         {config.has_api_key && (

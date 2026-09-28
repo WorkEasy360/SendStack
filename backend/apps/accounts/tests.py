@@ -1,3 +1,5 @@
+import re
+
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
@@ -55,7 +57,12 @@ class AuthenticationApiTests(TestCase):
             data={"email": self.user.email},
             content_type="application/json",
         )
-        reset_url = mail.outbox[0].body.rsplit(" ", 1)[-1]
+        # Found by pattern rather than by taking the last word of the body.
+        # The reset email is now a proper message -- a greeting, the link, the
+        # expiry, a security warning and a support footer -- so "the last
+        # space-separated token" is the full stop after the account name, not
+        # the URL.
+        reset_url = re.search(r"https?://\S*reset-password\S*", mail.outbox[0].body).group(0)
         query = parse_qs(urlparse(reset_url).query)
         response = self.client.post(
             "/api/v1/auth/password-reset/confirm/",
@@ -239,7 +246,7 @@ class ManagedUserApiTests(TestCase):
 class SuperuserCreationTests(TestCase):
     def test_createsuperuser_lands_on_the_platform_tenant(self):
         user = get_user_model().objects.create_superuser(
-            username="root", email="root@multisender.test", password="StrongPass!123"
+            username="root", email="root@sendstack.test", password="StrongPass!123"
         )
 
         self.assertEqual(user.role, get_user_model().Role.SUPERADMIN)

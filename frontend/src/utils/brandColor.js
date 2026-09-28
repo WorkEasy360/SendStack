@@ -26,6 +26,10 @@ const STEPS = {
     900: [0, 0.38],
 };
 
+// The steps used as solid fills (buttons, progress bars, active nav accents),
+// which read the same on a light or a dark page.
+const FILL_STEPS = [300, 400, 500, 600];
+
 function parseHex(hex) {
     const value = String(hex || "").trim().replace("#", "");
     const full =
@@ -70,13 +74,18 @@ export function brandRamp(hex) {
  * removing the properties restores the built-in emerald with no reload — a
  * customer who clears their colour should see the default immediately.
  */
-export function applyBrandColor(hex) {
+export function applyBrandColor(hex, dark = false) {
     const root = document.documentElement;
     const ramp = brandRamp(hex);
 
     for (const step of Object.keys(STEPS)) {
         const property = `--color-brand-${step}`;
-        if (ramp) root.style.setProperty(property, ramp[property]);
+        // In dark mode only the fill steps come from the reseller's colour.
+        // The tints (50-200) and the text steps (700-900) are derived from
+        // 500 by the stylesheet's dark block -- and an inline property would
+        // beat that block, leaving pale badges on a dark page.
+        const followsColour = !dark || FILL_STEPS.includes(Number(step));
+        if (ramp && followsColour) root.style.setProperty(property, ramp[property]);
         else root.style.removeProperty(property);
     }
 }

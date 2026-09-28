@@ -23,11 +23,20 @@ def visible_accounts(actor):
     return User.objects.filter(pk=actor.pk)
 
 
-def _record(*, account, from_account, to_account, amount, type_, balance_before, balance_after, reference, created_by):
+def _record(*, account, from_account, to_account, amount, type_, balance_before, balance_after, reference,
+            created_by, operation_id=None):
     return CreditTransaction.objects.create(
         account=account, from_account=from_account, to_account=to_account, amount=amount, type=type_,
         balance_before=balance_before, balance_after=balance_after, reference=reference, created_by=created_by,
+        operation_id=operation_id or None,
     )
+
+
+def operation_applied(operation_id: str) -> bool:
+    """Whether a balance move with this idempotency handle has already been recorded."""
+    if not operation_id:
+        return False
+    return CreditTransaction.objects.filter(operation_id=operation_id).exists()
 
 
 def assign_credits(*, actor, target, amount: int, reference: str = "", deduct: bool = True):
@@ -205,28 +214,48 @@ def reserve_credits(*, user_id: int, amount: int, reference: str = "") -> None:
         )
 
 
-def release_credits(*, user_id: int, amount: int = 1, reference: str = "") -> None:
+def release_credits(*, user_id: int, amount: int = 1, reference: str = "", operation_id: str = "") -> None:
+    """
+    Return a held reservation.
+
+    `operation_id`, when given, makes this fire at most once ever: a second
+    call with the same handle (a redelivered task, the recovery sweep cleaning
+    up after a dead worker, a duplicate webhook) is a no-op. The check runs
+    *under the account row lock* so two racing callers serialise -- the second
+    sees the first's row and returns.
+    """
     if amount <= 0:
         return
     with transaction.atomic():
         locked = User.objects.select_for_update().get(pk=user_id)
+        if operation_id and operation_applied(operation_id):
+            return
         to_release = min(amount, locked.reserved_credits)
-        if to_release == 0:
+        if to_release == 0 and not operation_id:
             return
         locked.reserved_credits -= to_release
         locked.save(update_fields=["reserved_credits"])
         _record(
             account=locked, from_account=None, to_account=None, amount=to_release,
             type_=CreditTransaction.Type.RELEASE, balance_before=locked.credits, balance_after=locked.credits,
-            reference=reference, created_by=None,
+            reference=reference, created_by=None, operation_id=operation_id,
         )
 
 
-def consume_credit(*, user_id: int, amount: int = 1, reference: str = "") -> None:
+def consume_credit(*, user_id: int, amount: int = 1, reference: str = "", operation_id: str = "") -> None:
+    """
+    Spend a reserved credit on a message that was actually sent.
+
+    `operation_id` gives the same fire-once guarantee as `release_credits`: the
+    send path keys it on the message, so a message is charged exactly once
+    however many times the task runs or the sweep reconciles it.
+    """
     if amount <= 0:
         return
     with transaction.atomic():
         locked = User.objects.select_for_update().get(pk=user_id)
+        if operation_id and operation_applied(operation_id):
+            return
         locked.reserved_credits -= min(amount, locked.reserved_credits)
         before = locked.credits
         locked.credits = max(0, before - amount)
@@ -234,5 +263,5 @@ def consume_credit(*, user_id: int, amount: int = 1, reference: str = "") -> Non
         _record(
             account=locked, from_account=locked, to_account=None, amount=amount,
             type_=CreditTransaction.Type.CONSUME, balance_before=before, balance_after=locked.credits,
-            reference=reference, created_by=None,
+            reference=reference, created_by=None, operation_id=operation_id,
         )

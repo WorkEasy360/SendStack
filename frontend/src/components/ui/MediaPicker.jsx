@@ -52,7 +52,7 @@ function basename(url = "") {
 function SmallInput({ className = "", ...props }) {
     return (
         <input
-            className={`w-full rounded-md border border-ink-200 bg-white px-2 py-1 text-xs text-ink-900 placeholder:text-ink-400 transition-colors hover:border-ink-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/15 ${className}`}
+            className={`w-full rounded-md border border-ink-200 bg-surface px-2 py-1 text-xs text-ink-900 placeholder:text-ink-400 transition-colors hover:border-ink-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/15 ${className}`}
             {...props}
         />
     );
@@ -107,9 +107,9 @@ export default function MediaPicker({
             // repeated `files` field precisely so this is not N round trips.
             const form = new FormData();
             chosen.forEach((file) => form.append("files", file));
-            const { data } = await api.post("/media/assets/", form, {
-                headers: { "Content-Type": "multipart/form-data" },
-            });
+            // No content type is set here on purpose: `api` strips it for a
+            // FormData body so the browser can supply the multipart boundary.
+            const { data } = await api.post("/media/assets/", form);
 
             setSizes((previous) => {
                 const next = { ...previous };
@@ -256,7 +256,7 @@ export default function MediaPicker({
                         return (
                             <li
                                 key={`${item.url}-${index}`}
-                                className="flex items-start gap-2.5 rounded-lg border border-ink-200 bg-white p-2.5"
+                                className="flex items-start gap-2.5 rounded-lg border border-ink-200 bg-surface p-2.5"
                             >
                                 <span className="shrink-0 w-11 h-11 rounded-lg bg-ink-100 text-ink-500 flex items-center justify-center overflow-hidden">
                                     {item.type === "IMAGE" ? (

@@ -23,7 +23,7 @@ from django.utils import timezone
 from .limits import effective_limits, policy_for, usage
 from .models import AccountHealthEvent, WhatsAppAccount
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 #: Provider errors that mean "this number is blocked", not "this send failed".
 #: Matched case-insensitively against the provider's own error text, which is

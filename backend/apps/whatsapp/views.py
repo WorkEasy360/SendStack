@@ -1,31 +1,21 @@
 from django.db.models import Count, ProtectedError, Q
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from apps.audit.services import log_event
+from apps.subscriptions.services import quota_guard
 from core.bulk import BulkActionMixin
 
 from . import health as health_service
+from .connections.manager import ConnectionManager
 from .limits import policy_for
 from .models import AccountHealthEvent, WhatsAppAccount
 from .serializers import AccountHealthEventSerializer, SendingPolicySerializer, WhatsAppAccountSerializer
 from .services import WhatsAppConnectionService
-
-
-class DeviceHasHistory(APIException):
-    """A device that campaigns or messages still reference cannot be deleted."""
-
-    status_code = status.HTTP_409_CONFLICT
-    default_detail = "This device has send history and cannot be deleted."
-    default_code = "device_has_history"
-
-
-def _plural(count, noun):
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 class WhatsAppAccountViewSet(BulkActionMixin, viewsets.ModelViewSet):
@@ -70,10 +60,19 @@ class WhatsAppAccountViewSet(BulkActionMixin, viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        account = serializer.save(
-            user=self.request.user,
-            tenant=self.request.user.tenant,
-        )
+        # The plan's device ceiling, held across the create. Two requests
+        # arriving together on the last free slot both block on the tenant's
+        # row inside quota_guard, so the second one counts the first one's
+        # device and is refused -- see apps.subscriptions.services.quota_guard.
+        #
+        # Deliberately only here: connecting, reconnecting and refreshing a QR
+        # all act on a device that already exists and must never be refused
+        # for taking a slot it is already holding.
+        with quota_guard(self.request.user.tenant_id, "devices"):
+            account = serializer.save(
+                user=self.request.user,
+                tenant=self.request.user.tenant,
+            )
         log_event(
             request=self.request,
             action="whatsapp_account.created",
@@ -84,55 +83,55 @@ class WhatsAppAccountViewSet(BulkActionMixin, viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
-        # Campaign.whatsapp_account and Message.whatsapp_account are both
-        # PROTECT -- send history deliberately outlives the device it went
-        # out from. That has to be checked *before* anything destructive
-        # happens: this used to disconnect the provider and write a
-        # "deleted" audit entry first, so a delete the database then refused
-        # left the device torn down, still listed, falsely logged as
-        # deleted, and the user looking at an unexplained 500.
-        campaigns = instance.campaigns.count()
-        messages = instance.messages.count()
-        if campaigns or messages:
-            referenced = " and ".join(
-                part for part in (
-                    _plural(campaigns, "campaign") if campaigns else "",
-                    _plural(messages, "message") if messages else "",
-                ) if part
-            )
-            raise DeviceHasHistory(
-                f'"{instance.name}" cannot be deleted: {referenced} still reference it, '
-                "and that history is kept for reporting. Disconnect the device instead."
-            )
-
-        # Provider teardown (e.g. closes the Baileys socket and frees the QR
-        # bridge session) so deleting an account never leaves an orphaned
-        # session behind -- same leak class as refresh_qr, see
-        # ConnectionManager.refresh_qr. ConnectionManager.disconnect already
-        # swallows ProviderError internally (logs + continues), so deletion
-        # always proceeds even if the provider is unreachable.
+        # Deleting a device always succeeds, whatever it is mid-way through.
+        # Provider teardown first (e.g. closes the Baileys socket and frees
+        # the QR bridge session) so deletion never leaves an orphaned session
+        # behind -- same leak class as refresh_qr, see
+        # ConnectionManager.refresh_qr. ConnectionManager.disconnect swallows
+        # ProviderError internally (logs + continues), so deletion still
+        # proceeds if the provider is unreachable, and dropping the
+        # connection is also what takes any campaign still running on this
+        # device out of the eligible pool -- see campaigns.assignment.
         WhatsAppConnectionService.disconnect(instance)
+
+        # Campaign.whatsapp_account and Message.whatsapp_account are PROTECT:
+        # send history deliberately outlives the device it went out from, so
+        # the row physically cannot be erased once anything references it.
+        # That is a reporting constraint, not a reason to refuse the user --
+        # this used to answer a 409 telling them to disconnect instead. So a
+        # referenced device is archived: it leaves every list and picker,
+        # stops counting against the plan's device limit and can never send
+        # again, while the reports that join through it keep resolving. Only
+        # a device nothing references is erased outright.
+        archived = instance.campaigns.exists() or instance.messages.exists()
         log_event(
             request=self.request,
             action="whatsapp_account.deleted",
             tenant=instance.tenant,
             object_type="whatsapp_account",
             object_id=instance.pk,
-            metadata={"account_type": instance.account_type, "name": instance.name},
+            metadata={"account_type": instance.account_type, "name": instance.name, "archived": archived},
         )
+        if archived:
+            self._archive(instance)
+            return
         try:
             instance.delete()
-        except ProtectedError as exc:
-            # Backstop for any PROTECT relation added after the explicit
-            # checks above -- a 409 naming the model beats a bare 500.
-            models = sorted({obj._meta.verbose_name for obj in exc.protected_objects})
-            raise DeviceHasHistory(
-                f'"{instance.name}" cannot be deleted: it is still referenced by {", ".join(models)}.'
-            ) from exc
+        except ProtectedError:
+            # Backstop for any PROTECT relation added after the two checked
+            # above -- archiving keeps the user's delete honest rather than
+            # answering a bare 500.
+            self._archive(instance)
+
+    @staticmethod
+    def _archive(instance):
+        instance.archived_at = timezone.now()
+        instance.status = WhatsAppAccount.Status.DISCONNECTED
+        instance.save(update_fields=["archived_at", "status", "updated_at"])
 
     # Both handlers go through perform_destroy / the same disconnect service
-    # the single-device endpoints use, so a device with send history is still
-    # refused (409 -> reported per device) rather than deleted in bulk.
+    # the single-device endpoints use, so a device with send history is
+    # archived here too rather than being refused mid-batch.
     def _bulk_delete(self, request, instance):
         self.perform_destroy(instance)
 
@@ -288,6 +287,36 @@ class WhatsAppAccountViewSet(BulkActionMixin, viewsets.ModelViewSet):
     def health(self, request, pk=None):
         account = self.get_object()
         return Response({"account_id": account.pk, "name": account.name, **health_service.health_snapshot(account)})
+
+    @action(detail=False, methods=["get"], url_path="capabilities")
+    def capabilities(self, request):
+        """
+        What each of this workspace's numbers can actually deliver.
+
+        Read by the composer before a message type is offered, so somebody
+        building a poll on a Cloud API number is told before they build it
+        rather than after a thousand recipients received a numbered list.
+
+        Keyed by account id, with the provider defaults alongside, because the
+        composer also has to answer "could *any* of my numbers send this?"
+        when no number has been chosen yet.
+        """
+        from .providers.registry import provider_capabilities
+
+        accounts = self.get_queryset().only("id", "name", "provider", "status")
+        return Response({
+            "accounts": [
+                {
+                    "id": account.pk,
+                    "name": account.name,
+                    "provider": account.provider,
+                    "status": account.status,
+                    "capabilities": ConnectionManager.capabilities(account),
+                }
+                for account in accounts
+            ],
+            "providers": provider_capabilities(),
+        })
 
     @action(detail=False, methods=["get"], url_path="health-events")
     def health_events(self, request):

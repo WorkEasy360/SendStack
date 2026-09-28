@@ -9,11 +9,13 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from core.urls_safety import normalize_redirect_url
+
 from . import services
 from .models import TrackedLink
 from .serializers import TrackedLinkSerializer
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @require_GET
@@ -30,6 +32,17 @@ def redirect_link(request, code):
     if link is None:
         raise Http404("Unknown link.")
 
+    # Checked here, at the moment of the redirect, rather than trusted from the
+    # row. The rewriter that writes these only ever matches http/https, so this
+    # should never fire -- which is the point: it is what stands between a
+    # future change to that pattern (or a row written before it existed) and
+    # this endpoint sending a contact to a javascript:/data:/file: URL on our
+    # own origin's say-so. A link that fails is a dead link, not a redirect.
+    destination = normalize_redirect_url(link.target_url)
+    if destination is None:
+        logger.warning("Refused to redirect link %s: its destination is not an http(s) URL.", code)
+        raise Http404("Unknown link.")
+
     try:
         forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
         services.record_click(
@@ -41,7 +54,7 @@ def redirect_link(request, code):
     except Exception:
         logger.exception("Failed to record click on link %s; redirecting anyway.", code)
 
-    return HttpResponseRedirect(link.target_url)
+    return HttpResponseRedirect(destination)
 
 
 class TrackedLinkViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):

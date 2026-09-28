@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -7,15 +9,17 @@ from rest_framework.response import Response
 from apps.audit.services import log_event
 from core.bulk import BulkActionError, BulkActionMixin
 
+from . import preview as campaign_preview
 from . import services
 from .models import Campaign
 from .serializers import CampaignEstimateSerializer, CampaignSerializer
 from .services import CampaignError
 
+logger = logging.getLogger("sendstack")
+
 
 class CampaignViewSet(BulkActionMixin, viewsets.ModelViewSet):
 
-    print("CampaignViewSet initialized")
     permission_classes = [IsAuthenticated]
     serializer_class = CampaignSerializer
     filterset_fields = ["status", "whatsapp_account"]
@@ -83,11 +87,44 @@ class CampaignViewSet(BulkActionMixin, viewsets.ModelViewSet):
         return Response(CampaignSerializer(campaign).data)
 
     @action(detail=True, methods=["get"])
+    def health(self, request, pk=None):
+        """
+        Message counts by status for this campaign, with the recovery figures
+        broken out -- how many sends are stuck in SENDING past their lease and
+        how many landed in RECOVERY_REQUIRED. This is the view that tells an
+        operator a campaign has silently stopped moving.
+        """
+        from apps.messaging.recovery import campaign_health
+
+        return Response(campaign_health(self.get_object()))
+
+    @action(detail=True, methods=["get"])
     def estimate(self, request, pk=None):
         campaign = self.get_object()
-        serializer = CampaignEstimateSerializer({"estimated_recipients": services.estimate_recipients(campaign)})
-        print("Estimated recipients:", serializer.data)
+        estimated = services.estimate_recipients(campaign)
+        serializer = CampaignEstimateSerializer({"estimated_recipients": estimated})
+        logger.debug("Campaign %s estimated at %s recipient(s).", campaign.pk, estimated)
         return Response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        """
+        The full pre-send picture: who is eligible, who is skipped and why, and
+        what it will cost.
+
+        `estimate` above is kept, and still answers only "how many contacts
+        match the rule". This is the number a customer should be shown before
+        spending anything -- see apps.campaigns.preview for why the two are
+        different questions and why this one is computed from the send path's
+        own rules rather than from a second copy of them.
+        """
+        campaign = self.get_object()
+        data = campaign_preview.build(campaign)
+        logger.debug(
+            "Campaign %s preview: %s eligible of %s selected.",
+            campaign.pk, data["eligible"], data["selected"],
+        )
+        return Response(data)
 
     @action(detail=True, methods=["post"])
     def launch(self, request, pk=None):

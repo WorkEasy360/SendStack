@@ -4,12 +4,12 @@ const VARIANTS = {
     primary:
         "bg-brand-600 text-white border border-transparent hover:bg-brand-700 active:bg-brand-800 disabled:bg-brand-300",
     secondary:
-        "bg-white text-ink-700 border border-ink-200 shadow-card hover:bg-ink-50 hover:border-ink-300 active:bg-ink-100 disabled:opacity-50",
+        "bg-surface text-ink-700 border border-ink-200 shadow-card hover:bg-ink-50 hover:border-ink-300 active:bg-ink-100 disabled:opacity-50",
     danger: "bg-red-600 text-white border border-transparent hover:bg-red-700 active:bg-red-800 disabled:bg-red-300",
     success:
         "bg-brand-600 text-white border border-transparent hover:bg-brand-700 active:bg-brand-800 disabled:bg-brand-300",
     ghost: "bg-transparent text-ink-600 border border-transparent hover:bg-ink-100 hover:text-ink-900 active:bg-ink-200 disabled:opacity-50",
-    dark: "bg-ink-900 text-white border border-transparent hover:bg-ink-800 active:bg-ink-700 disabled:bg-ink-400",
+    dark: "bg-ink-900 text-ink-50 border border-transparent hover:bg-ink-800 active:bg-ink-700 disabled:bg-ink-400",
 };
 
 const SIZES = {

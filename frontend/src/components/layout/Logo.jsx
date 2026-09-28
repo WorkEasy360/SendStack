@@ -29,7 +29,7 @@ export function LogoMark({ size = 32, className = "" }) {
 
     return (
         <span
-            className={`inline-flex items-center justify-center rounded-lg bg-ink-900 text-brand-400 shrink-0 ${className}`}
+            className={`inline-flex items-center justify-center theme-static rounded-lg bg-ink-900 text-brand-400 shrink-0 ${className}`}
             style={{ width: size, height: size }}
             aria-hidden="true"
         >

@@ -42,6 +42,7 @@ class CompliancePolicySerializer(serializers.ModelSerializer):
             "send_opt_out_confirmation", "opt_out_confirmation",
             "send_opt_in_confirmation", "opt_in_confirmation",
             "opt_out_style", "opt_out_button_title", "opt_out_footer",
+            "require_marketing_consent",
             "quiet_hours_enabled", "quiet_hours_start", "quiet_hours_end",
             "timezone", "use_contact_timezone",
             "built_in_stop_keywords", "built_in_start_keywords", "available_timezones",
@@ -93,7 +94,7 @@ class ConsentEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = ConsentEvent
         fields = [
-            "id", "contact", "contact_name", "contact_phone", "event", "source",
+            "id", "contact", "contact_name", "contact_phone", "phone", "event", "source",
             "actor", "actor_name", "message", "detail", "created_at",
         ]
         read_only_fields = fields

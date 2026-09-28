@@ -2,6 +2,8 @@ import re
 
 from rest_framework import serializers
 
+from apps.ai.providers.registry import base_url_problem, model_name_problem
+
 from .models import CallSession, CallTurn, VoiceAgentConfig
 
 # E.164: a plus, a non-zero country digit, then up to fourteen more. Carriers
@@ -42,7 +44,7 @@ class VoiceAgentConfigSerializer(serializers.ModelSerializer):
             "has_carrier_credentials", "has_api_key", "account_sid_hint",
             "from_number", "display_name", "voice", "language", "speech_hints",
             "answer_inbound", "inbound_greeting", "inbound_webhook_url",
-            "model", "effort", "temperature", "max_output_tokens",
+            "model_provider", "model", "base_url", "effort", "temperature", "max_output_tokens",
             "business_context", "default_goal", "greeting", "voicemail_message",
             "knowledge_chunks", "answer_from_knowledge_only",
             "max_turns", "max_call_seconds", "silence_timeout_seconds", "max_silent_turns",
@@ -92,6 +94,18 @@ class VoiceAgentConfigSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         instance = self.instance
+
+        # Checked whether or not the agent is being switched on: a wrong model
+        # name is wrong now, and finding out mid-call is finding out too late.
+        provider = attrs.get("model_provider", getattr(instance, "model_provider", ""))
+        problem = model_name_problem(provider, attrs.get("model", getattr(instance, "model", "")))
+        if problem:
+            raise serializers.ValidationError({"model": problem})
+
+        problem = base_url_problem(provider, attrs.get("base_url", getattr(instance, "base_url", "")))
+        if problem:
+            raise serializers.ValidationError({"base_url": problem})
+
         enabling = attrs.get("is_enabled", getattr(instance, "is_enabled", False))
         if not enabling:
             return attrs

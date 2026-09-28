@@ -15,19 +15,22 @@ from apps.contacts.models import Contact
 from . import activity, lifecycle, segments
 from .models import Activity, ContactNote, Deal, Pipeline, PipelineStage, Task
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 #: The stages a pipeline starts with: (name, kind, probability, colour).
-#: The standard B2B ladder, because it is what people recognise -- but only a
+#: Three working steps and two endings, because a board a seller can read at a
+#: glance beats the full B2B ladder they would have to scroll -- but only a
 #: starting point. Stages are editable per pipeline, and nothing in the code
-#: knows these names (see PipelineStage.kind).
+#: knows these names (see PipelineStage.kind), so a tenant who wants "Proposal"
+#: back adds one from the Stages dialog and every report keeps working.
+#:
+#: Both endings are here on purpose: a pipeline with nowhere to put a sale that
+#: fell through leaves dead deals sitting in an open stage, inflating the
+#: forecast, which is the one number the board exists to get right.
 DEFAULT_STAGES = (
     ("New", PipelineStage.Kind.OPEN, 10, "#64748b"),
-    ("Contacted", PipelineStage.Kind.OPEN, 20, "#3b82f6"),
-    ("Interested", PipelineStage.Kind.OPEN, 35, "#6366f1"),
-    ("Qualified", PipelineStage.Kind.OPEN, 50, "#8b5cf6"),
-    ("Proposal", PipelineStage.Kind.OPEN, 65, "#a855f7"),
-    ("Negotiation", PipelineStage.Kind.OPEN, 80, "#f59e0b"),
+    ("Contacted", PipelineStage.Kind.OPEN, 30, "#3b82f6"),
+    ("Qualified", PipelineStage.Kind.OPEN, 60, "#8b5cf6"),
     ("Won", PipelineStage.Kind.WON, 100, "#16a34a"),
     ("Lost", PipelineStage.Kind.LOST, 0, "#dc2626"),
 )
@@ -120,7 +123,7 @@ def move_deal(deal: Deal, stage: PipelineStage, *, actor=None) -> Deal:
     previous = deal.stage
     deal.stage = stage
     # closed_at is recomputed by save(): reopening a closed deal has to clear
-    # it, or the deal reports a close date while sitting in Negotiation.
+    # it, or the deal reports a close date while sitting in an open stage.
     if previous.kind != PipelineStage.Kind.OPEN and stage.kind == PipelineStage.Kind.OPEN:
         deal.closed_at = None
     deal.save()

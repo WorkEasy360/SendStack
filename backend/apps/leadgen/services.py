@@ -19,7 +19,7 @@ from django.utils import timezone
 
 from .models import ClickToChatLink, LeadEvent, LinkVisit
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 _CODE_BYTES = 4  # -> a 6-character code, short enough to read off a poster
 _REFERENCE_RE = re.compile(r"#([A-Za-z0-9_-]{4,16})")

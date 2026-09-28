@@ -4,9 +4,9 @@ import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 const ToastContext = createContext(null);
 
 const TONES = {
-    success: { classes: "border-brand-200 bg-white", icon: CheckCircle2, iconColor: "text-brand-600" },
-    error: { classes: "border-red-200 bg-white", icon: AlertCircle, iconColor: "text-red-500" },
-    info: { classes: "border-ink-200 bg-white", icon: Info, iconColor: "text-blue-500" },
+    success: { classes: "border-brand-200 bg-surface", icon: CheckCircle2, iconColor: "text-brand-600" },
+    error: { classes: "border-red-200 bg-surface", icon: AlertCircle, iconColor: "text-red-500" },
+    info: { classes: "border-ink-200 bg-surface", icon: Info, iconColor: "text-blue-500" },
 };
 
 const DEFAULT_DURATION_MS = 4000;

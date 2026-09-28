@@ -6,7 +6,7 @@ from apps.inbox.signals import inbound_message_recorded
 
 from . import services
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @receiver(inbound_message_recorded)

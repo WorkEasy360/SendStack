@@ -6,7 +6,7 @@ export default function EmptyState({ icon: Icon, title, description, action, var
     const shell =
         variant === "plain"
             ? "py-10 px-6 text-center"
-            : "bg-white border border-dashed border-ink-300 rounded-card py-14 px-6 text-center";
+            : "bg-surface border border-dashed border-ink-300 rounded-card py-14 px-6 text-center";
 
     return (
         <div className={`${shell} ${className}`}>

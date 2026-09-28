@@ -129,7 +129,7 @@ export default function Users() {
             header: "Username",
             render: (u) => (
                 <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="shrink-0 w-8 h-8 rounded-lg bg-ink-900 text-white text-xs font-bold flex items-center justify-center uppercase">
+                    <span className="shrink-0 w-8 h-8 rounded-lg bg-ink-900 text-ink-50 text-xs font-bold flex items-center justify-center uppercase">
                         {(u.username || "?").charAt(0)}
                     </span>
                     <div className="min-w-0">

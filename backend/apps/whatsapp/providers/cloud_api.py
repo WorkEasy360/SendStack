@@ -1,7 +1,7 @@
 """
 Official Meta WhatsApp Business Cloud API provider.
 
-This is the only provider MultiSender ships with. It talks to Meta's
+This is the only provider SendStack ships with. It talks to Meta's
 supported, licensed HTTP API (https://developers.facebook.com/docs/whatsapp/cloud-api)
 using each account's own phone_number_id / access_token. It deliberately does
 NOT implement any unofficial/reverse-engineered WhatsApp Web protocol -- that
@@ -15,7 +15,7 @@ import logging
 
 import requests
 
-from core.buttons import REPLY, URL, button_kind
+from core.buttons import REPLY, URL, body_with_text_buttons, button_kind, plan_delivery
 
 from .base import (
     ConnectionResult,
@@ -29,7 +29,7 @@ from .base import (
     WhatsAppProvider,
 )
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 GRAPH_API_VERSION = "v20.0"
 GRAPH_API_BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
@@ -45,8 +45,26 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
     # synchronous credential check, so there is no QR step to expose.
     supports_qr = False
 
-    # Interactive messages are a first-class Cloud API message type.
+    # Interactive messages are a first-class Cloud API message type, and both
+    # the reply-button and the link ("call to action URL") shapes render on
+    # every current client.
     supports_interactive_buttons = True
+    supports_url_buttons = True
+
+    # A menu is `interactive.type = "list"`, which is likewise free-form and
+    # not tied to an approved template.
+    supports_list_messages = True
+
+    # Polls are not. WhatsApp added them for personal and Business-app users,
+    # not for the Cloud API: there is no poll message type in the Graph API at
+    # any version, so a Cloud API number cannot send one at all. This is the
+    # inverse of the QR provider, which sends polls natively and cannot send
+    # buttons -- and it is why the composer asks the capability layer rather
+    # than assuming the "official" connection is the more capable one.
+    supports_poll_messages = False
+
+    # Call buttons are template-only on the Cloud API. See core.buttons.
+    supports_call_buttons = False
 
     def _headers(self, account) -> dict:
         token = account.get_access_token()
@@ -72,6 +90,24 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
                 timeout=REQUEST_TIMEOUT_SECONDS,
                 **kwargs,
             )
+        except requests.ConnectTimeout as exc:
+            # The connection was never established, so nothing was sent. Safe
+            # to retry.
+            raise ProviderError(
+                f"Timed out connecting to WhatsApp Cloud API: {exc}", code="timeout",
+            ) from exc
+        except requests.Timeout as exc:
+            # A read timeout: the request WAS transmitted and we simply never
+            # heard back. Meta may or may not have accepted the message. This
+            # must be flagged ambiguous so the send is not blindly retried into
+            # a duplicate -- the Cloud API has no idempotent submission and no
+            # per-message status lookup, so an ambiguous send here becomes
+            # RECOVERY_REQUIRED. (The QR bridge path has always done this; the
+            # Cloud API path used to fold every timeout into "network_error",
+            # which is retryable -- a latent duplicate-send bug.)
+            raise ProviderError(
+                f"Timed out waiting for WhatsApp Cloud API: {exc}", code="timeout", ambiguous=True,
+            ) from exc
         except requests.RequestException as exc:
             raise ProviderError(f"Could not reach WhatsApp Cloud API: {exc}", code="network_error") from exc
 
@@ -137,24 +173,32 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
 
     def disconnect(self, account, session_id: str | None) -> None:
         # Nothing to revoke on Meta's side from here -- the user must remove
-        # MultiSender's access from their Meta Business settings if desired.
+        # SendStack's access from their Meta Business settings if desired.
         return None
 
-    def _send(self, account, payload: dict) -> SendResult:
+    def _send(self, account, payload: dict, *, operation_id: str = "") -> SendResult:
         url = f"{GRAPH_API_BASE_URL}/{account.phone_number_id}/messages"
         payload.setdefault("messaging_product", "whatsapp")
         payload.setdefault("recipient_type", "individual")
+        if operation_id:
+            # Echoed back on every status webhook for this message, so a
+            # delivery receipt can be tied to the right send even if the
+            # provider_message_id below never reached us (worker died first).
+            # It is NOT an idempotency key -- Meta has none -- so a retry of an
+            # ambiguous Cloud API send is still a duplicate, which is why such
+            # a send becomes RECOVERY_REQUIRED rather than being retried.
+            payload["biz_opaque_callback_data"] = operation_id
 
         try:
             data = self._request("POST", url, account, json=payload)
         except ProviderError as exc:
-            return SendResult(success=False, error=exc.message)
+            return SendResult(success=False, error=exc.message, code=exc.code or "", ambiguous=exc.ambiguous)
 
         messages = data.get("messages") or []
         provider_message_id = messages[0]["id"] if messages else None
         return SendResult(success=True, provider_message_id=provider_message_id)
 
-    def send_text_message(self, account, to: str, body: str) -> SendResult:
+    def send_text_message(self, account, to: str, body: str, operation_id: str = "") -> SendResult:
         return self._send(
             account,
             {
@@ -162,11 +206,15 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
                 "type": "text",
                 "text": {"body": body, "preview_url": True},
             },
+            operation_id=operation_id,
         )
 
-    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None) -> SendResult:
+    def send_media_message(self, account, to, media_type, media_link, caption=None, filename=None,
+                           operation_id: str = "") -> SendResult:
         if media_type not in _MEDIA_TYPES:
-            return SendResult(success=False, error=f"Unsupported media type '{media_type}'.")
+            return SendResult(
+                success=False, error=f"Unsupported media type '{media_type}'.", code="not_supported",
+            )
 
         media_object = {"link": media_link}
         if caption and media_type in ("image", "video", "document"):
@@ -181,19 +229,37 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
                 "type": media_type,
                 media_type: media_object,
             },
+            operation_id=operation_id,
         )
 
-    def send_interactive_message(self, account, to: str, body: str, buttons: list) -> SendResult:
-        kind = button_kind(buttons)
+    def send_interactive_message(self, account, to: str, body: str, buttons: list,
+                                 operation_id: str = "") -> SendResult:
+        """
+        One interactive envelope, plus body text for whatever did not fit in it.
+
+        The Graph API has no payload carrying two kinds of button at once, so a
+        mixed list is split by ``core.buttons.plan_delivery``: one kind goes
+        out tappable and the rest are written into the body as labelled lines.
+        Sharing that function with the composer's delivery preview is what
+        makes the text below character-for-character what the author was shown.
+        """
+        if not buttons:
+            return SendResult(
+                success=False, error="This message has no buttons to send.", code="invalid_request",
+            )
+
+        tappable, spelled_out = plan_delivery(buttons)
+        text = body_with_text_buttons(body, spelled_out)
+        kind = button_kind(tappable)
 
         if kind == REPLY:
             interactive = {
                 "type": "button",
-                "body": {"text": body},
+                "body": {"text": text},
                 "action": {
                     "buttons": [
                         {"type": "reply", "reply": {"id": button["id"], "title": button["title"]}}
-                        for button in buttons
+                        for button in tappable
                     ]
                 },
             }
@@ -203,18 +269,78 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
             # payload -- hence the separate branch rather than one shape.
             interactive = {
                 "type": "cta_url",
-                "body": {"text": body},
+                "body": {"text": text},
                 "action": {
                     "name": "cta_url",
-                    "parameters": {"display_text": buttons[0]["title"], "url": buttons[0]["url"]},
+                    "parameters": {"display_text": tappable[0]["title"], "url": tappable[0]["url"]},
                 },
             }
         else:
-            return SendResult(success=False, error="This message has no buttons to send.")
+            # Nothing tappable is left -- a call button on its own. Sent as
+            # plain text rather than refused: an interactive envelope with an
+            # empty action is a 400 from Meta, while the labelled number is
+            # exactly what a call button was always going to arrive as.
+            return self.send_text_message(account, to, text, operation_id=operation_id)
 
-        return self._send(account, {"to": to, "type": "interactive", "interactive": interactive})
+        return self._send(
+            account, {"to": to, "type": "interactive", "interactive": interactive},
+            operation_id=operation_id,
+        )
 
-    def send_template_message(self, account, to, template_name, language_code, components=None) -> SendResult:
+    def send_list_message(self, account, to: str, body: str, list_content: dict,
+                          operation_id: str = "") -> SendResult:
+        """
+        A tappable menu, as ``interactive.type = "list"``.
+
+        The row shape Meta wants is the one ``core.interactive`` already
+        normalises to, with one exception: an empty ``description`` must be
+        omitted rather than sent as "", which the API rejects. Section titles
+        are omitted on the same rule -- a single unnamed section is legal and
+        common, and sending a blank title is not.
+        """
+        sections = []
+        for section in (list_content or {}).get("sections", []):
+            rows = [
+                {
+                    key: value
+                    for key, value in (
+                        ("id", row["id"]),
+                        ("title", row["title"]),
+                        ("description", row.get("description") or ""),
+                    )
+                    if value
+                }
+                for row in section.get("rows", [])
+            ]
+            if not rows:
+                continue
+            entry = {"rows": rows}
+            if section.get("title"):
+                entry["title"] = section["title"]
+            sections.append(entry)
+
+        if not sections:
+            return SendResult(
+                success=False, error="This message has no list rows to send.", code="invalid_request",
+            )
+
+        interactive = {
+            "type": "list",
+            "body": {"text": body},
+            "action": {"button": list_content.get("button") or "View options", "sections": sections},
+        }
+        if list_content.get("header"):
+            interactive["header"] = {"type": "text", "text": list_content["header"]}
+        if list_content.get("footer"):
+            interactive["footer"] = {"text": list_content["footer"]}
+
+        return self._send(
+            account, {"to": to, "type": "interactive", "interactive": interactive},
+            operation_id=operation_id,
+        )
+
+    def send_template_message(self, account, to, template_name, language_code, components=None,
+                              operation_id: str = "") -> SendResult:
         return self._send(
             account,
             {
@@ -226,6 +352,7 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
                     "components": components or [],
                 },
             },
+            operation_id=operation_id,
         )
 
     def verify_webhook_challenge(self, account, query_params: dict) -> str | None:
@@ -268,6 +395,7 @@ class WhatsAppCloudAPIProvider(WhatsAppProvider):
                             raw=status_obj,
                             message_id=message_id,
                             status=status.upper(),
+                            biz_opaque_callback_data=status_obj.get("biz_opaque_callback_data"),
                         )
                     )
 

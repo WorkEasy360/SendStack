@@ -12,6 +12,7 @@ from apps.inbox.models import Conversation
 
 from . import knowledge, services
 from . import recommendations as ai_recommendations
+from . import status as ai_status
 from .models import (
     AIAgentConfig,
     AIUsageLog,
@@ -19,8 +20,9 @@ from .models import (
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeEmbedding,
 )
-from .providers.anthropic import AIProviderError
+from .providers.base import AIProviderError
 from .serializers import (
     AIAgentConfigSerializer,
     AIUsageLogSerializer,
@@ -36,7 +38,15 @@ from .tasks import process_document_task
 
 
 class AIAgentConfigView(generics.RetrieveUpdateAPIView):
-    """One agent per tenant, reachable without knowing its id."""
+    """
+    One agent per tenant, reachable without knowing its id.
+
+    Readable on every plan and writable only on a plan that includes the
+    agent. Reading has to stay open: the settings screen renders the locked
+    state from this response, and a customer being shown what they would get
+    is the point of showing it at all. Writing does not -- configuring a
+    feature you do not have is how a downgraded tenant quietly keeps one.
+    """
 
     permission_classes = [IsAuthenticated]
     serializer_class = AIAgentConfigSerializer
@@ -45,6 +55,10 @@ class AIAgentConfigView(generics.RetrieveUpdateAPIView):
         config, _ = AIAgentConfig.objects.get_or_create(tenant=self.request.user.tenant)
         return config
 
+    def update(self, request, *args, **kwargs):
+        services.require_agent(request.user.tenant_id)
+        return super().update(request, *args, **kwargs)
+
 
 class ClearAPIKeyView(APIView):
     """Deleting the key is its own action, because a blank field means 'unchanged'."""
@@ -52,6 +66,9 @@ class ClearAPIKeyView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # Not gated: removing a key is always allowed. A tenant who has lost
+        # the feature should still be able to take their own credential back
+        # out of somebody else's database.
         config, _ = AIAgentConfig.objects.get_or_create(tenant=request.user.tenant)
         config.set_api_key(None)
         config.save(update_fields=["api_key_encrypted", "updated_at"])
@@ -125,6 +142,7 @@ class KnowledgeBaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def recommendations(self, request, pk=None):
+        services.require_agent(request.user.tenant_id)
         base = self.get_object()
         return Response({"results": ai_recommendations.build(request.user.tenant, knowledge_base=base)})
 
@@ -166,7 +184,17 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
             # The text of an uploaded document comes from the file, so editing
             # its title or base must re-point the chunks, not re-chunk pasted
             # text that is not authoritative here.
+            #
+            # The vectors have to move with them. `knowledge_base` is
+            # denormalised onto both tables, and semantic retrieval filters on
+            # the embedding's copy -- so a document moved out of a base whose
+            # vectors stayed behind goes on answering questions asked of the
+            # base it just left, which is the isolation bug this denormalisation
+            # is otherwise worth having.
             KnowledgeChunk.objects.filter(document=document).update(knowledge_base_id=document.knowledge_base_id)
+            KnowledgeEmbedding.objects.filter(chunk__document=document).update(
+                knowledge_base_id=document.knowledge_base_id,
+            )
             return
         count = knowledge.rebuild(document)
         KnowledgeDocument.objects.filter(pk=document.pk).update(
@@ -190,15 +218,40 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
         tenant = request.user.tenant
         base = serializer.validated_data.get("knowledge_base") or services.default_knowledge_base(tenant.pk)
         title = (serializer.validated_data.get("title") or "").strip() or upload.name.rsplit(".", 1)[0][:200]
+        replaces = serializer.validated_data.get("replaces")
 
-        document = KnowledgeDocument.objects.create(
-            tenant=tenant, knowledge_base=base, created_by=request.user,
-            title=title, content="", source_type=KnowledgeDocument.Source.FILE,
-            file=upload, original_filename=upload.name[:255],
-            content_type=(getattr(upload, "content_type", "") or "")[:150],
-            size_bytes=upload.size or 0,
-            status=KnowledgeDocument.Status.PENDING,
-        )
+        if replaces is not None:
+            # A new version of a document already here. Its chunks (and, by
+            # cascade, its vectors) go now rather than when the new file
+            # finishes parsing: between those two moments the document is
+            # PENDING and therefore already excluded from retrieval, so
+            # dropping them early costs nothing and guarantees the old text
+            # cannot be quoted at a customer while the new one is being read.
+            KnowledgeChunk.objects.filter(document=replaces).delete()
+            document = replaces
+            document.knowledge_base = base
+            document.title = title
+            document.content = ""
+            document.source_type = KnowledgeDocument.Source.FILE
+            document.file = upload
+            document.original_filename = upload.name[:255]
+            document.content_type = (getattr(upload, "content_type", "") or "")[:150]
+            document.size_bytes = upload.size or 0
+            document.page_count = 0
+            document.chunk_count = 0
+            document.status = KnowledgeDocument.Status.PENDING
+            document.error = ""
+            document.indexed_at = None
+            document.save()
+        else:
+            document = KnowledgeDocument.objects.create(
+                tenant=tenant, knowledge_base=base, created_by=request.user,
+                title=title, content="", source_type=KnowledgeDocument.Source.FILE,
+                file=upload, original_filename=upload.name[:255],
+                content_type=(getattr(upload, "content_type", "") or "")[:150],
+                size_bytes=upload.size or 0,
+                status=KnowledgeDocument.Status.PENDING,
+            )
         process_document_task.delay(document.pk)
         log_event(
             request=request, action="knowledge.document_uploaded", tenant=tenant,
@@ -310,7 +363,24 @@ class KnowledgeRecommendationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        services.require_agent(request.user.tenant_id)
         return Response({"results": ai_recommendations.build(request.user.tenant)})
+
+
+class AIStatusView(APIView):
+    """
+    Whether the assistant is actually working, in one request.
+
+    The agent's configuration, the knowledge base's processing state, every
+    connected WhatsApp number, what the automation ladder above the agent
+    would answer first, and what the last call did. Read-only: it never calls
+    a model, so it is safe for a dashboard to poll.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(ai_status.build(request.user.tenant_id))
 
 
 class SuggestReplyView(APIView):

@@ -1,7 +1,7 @@
 export default function Card({ className = "", padded = true, children, ...props }) {
     return (
         <div
-            className={`bg-white border border-ink-200 rounded-card shadow-card ${padded ? "p-5 sm:p-6" : ""} ${className}`}
+            className={`bg-surface border border-ink-200 rounded-card shadow-card ${padded ? "p-5 sm:p-6" : ""} ${className}`}
             {...props}
         >
             {children}

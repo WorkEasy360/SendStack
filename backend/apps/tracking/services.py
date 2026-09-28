@@ -18,9 +18,11 @@ from django.db.models import F
 from django.utils import timezone
 from django.utils.text import slugify
 
+from core.urls_safety import normalize_redirect_url
+
 from .models import LinkClick, TrackedLink
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 # Deliberately conservative: a URL ends at the first whitespace or angle
 # bracket, and common sentence punctuation is trimmed off the end afterwards.
@@ -46,6 +48,21 @@ def tracking_enabled() -> bool:
     leaving the original in place is the only safe answer.
     """
     return bool(getattr(settings, "LINK_TRACKING_ENABLED", True)) and bool(_public_base_url())
+
+
+def tracking_allowed(tenant_id) -> bool:
+    """
+    Whether this tenant's plan includes click tracking.
+
+    Separate from `tracking_enabled` because they fail differently: one is a
+    deployment that cannot shorten links at all, the other is a customer who
+    has not bought the feature. Both end in the same place -- the tenant's own
+    URL, untouched, in the message -- because a campaign whose links do not
+    work is a far worse outcome than a campaign whose clicks are not counted.
+    """
+    from apps.subscriptions.services import feature_enabled
+
+    return feature_enabled(tenant_id, "click_tracking")
 
 
 def short_url(code: str) -> str:
@@ -103,7 +120,7 @@ def campaign_utm(campaign) -> dict:
     )
 
 
-def rewrite(text: str, *, tenant_id: int, campaign=None, contact=None, utm=None) -> tuple[str, list]:
+def rewrite(text: str, *, tenant_id: int, campaign=None, contact=None, utm=None, allowed=None) -> tuple[str, list]:
     """
     Replace every URL in `text` with a short link for this recipient.
 
@@ -111,8 +128,19 @@ def rewrite(text: str, *, tenant_id: int, campaign=None, contact=None, utm=None)
     They are handed back rather than saved here so that a campaign building
     thousands of messages can insert them in one statement, and so that a
     caller that ends up not sending the message writes no rows at all.
+
+    This is the only place a TrackedLink is ever created, which is what makes
+    it the place the `click_tracking` entitlement is enforced: a plan without
+    it gets its text back unchanged and no rows, from every send path there
+    is. `allowed` lets a caller that is about to rewrite thousands of messages
+    for one tenant answer that question once instead of per recipient; left
+    None it is asked here.
     """
     if not text or not tracking_enabled():
+        return text, []
+    if allowed is None:
+        allowed = tracking_allowed(tenant_id)
+    if not allowed:
         return text, []
 
     base = _public_base_url()
@@ -123,6 +151,15 @@ def rewrite(text: str, *, tenant_id: int, campaign=None, contact=None, utm=None)
         # Never shorten our own short links: a message forwarded back into a
         # campaign would otherwise gain a redirect hop on every pass.
         if base and url.startswith(f"{base}/r/"):
+            return match.group(0)
+
+        # Nothing that is not a plain http(s) destination becomes a short link.
+        # _URL_RE already only matches those, so this is the second lock on the
+        # same door -- and it is the one that stays correct if that pattern is
+        # ever widened. Left untouched rather than dropped: the message is a
+        # faithful record of what the tenant wrote, and refusing to *shorten*
+        # something is not a reason to silently edit their text.
+        if normalize_redirect_url(url) is None:
             return match.group(0)
 
         link = TrackedLink(

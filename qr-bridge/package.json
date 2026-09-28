@@ -1,11 +1,11 @@
 {
-  "name": "multisender-qr-bridge",
+  "name": "sendstack-qr-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "Self-hosted QR/device-linking bridge for MultiSender's WhatsApp connection wizard. Speaks the HTTP contract documented in backend/apps/whatsapp/providers/qr_bridge.py; MultiSender's Django backend never talks to WhatsApp directly for QR accounts.",
+  "description": "Self-hosted QR/device-linking bridge for SendStack's WhatsApp connection wizard. Speaks the HTTP contract documented in backend/apps/whatsapp/providers/qr_bridge.py; SendStack's Django backend never talks to WhatsApp directly for QR accounts.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -15,6 +15,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.19",
+    "baileys_helper": "^1.0.6",
     "express": "^4.21.2",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4"

@@ -1,10 +1,11 @@
 import logging
 
 from config.celery import app
+from core.backoff import retry_delay
 
 from . import services
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 
 @app.task(bind=True, max_retries=3)
@@ -14,7 +15,7 @@ def check_and_send_follow_up(self, message_id, rule_id):
     except Exception as exc:
         # Retried rather than dropped: the alternative is a follow-up silently
         # never sent because the database blinked at the wrong moment.
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+        raise self.retry(exc=exc, countdown=retry_delay(self.request.retries, base=60))
 
 
 @app.task

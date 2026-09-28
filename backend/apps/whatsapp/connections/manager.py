@@ -23,7 +23,7 @@ from ..models import WhatsAppConnectionSession
 from ..providers import ConnectionWebhookEvent, SendResult, get_provider
 from ..providers.base import ProviderError
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
 
 _QR_CACHE_PREFIX = "whatsapp:qr:"
 
@@ -86,26 +86,35 @@ class ConnectionManager:
     @classmethod
     def refresh_qr(cls, account) -> dict:
         old_session = cls._latest_session(account)
-        if old_session and old_session.status in (
-            WhatsAppConnectionSession.Status.CONNECTING,
-            WhatsAppConnectionSession.Status.QR_READY,
+        if old_session and old_session.status not in (
+            WhatsAppConnectionSession.Status.EXPIRED,
+            WhatsAppConnectionSession.Status.ERROR,
+            WhatsAppConnectionSession.Status.DISCONNECTED,
         ):
-            old_session.status = WhatsAppConnectionSession.Status.EXPIRED
-            old_session.save(update_fields=["status", "updated_at"])
-            cache.delete(_qr_cache_key(old_session.pk))
-            # Explicitly tear down the old provider-side session before
-            # starting a new one -- otherwise every refresh leaks an
-            # abandoned session on the provider (e.g. an orphaned Baileys
-            # socket on the QR bridge that nobody will ever scan).
+            # A refresh is a replacement, not an additional socket. This is
+            # especially important when the database says CONNECTED but the
+            # provider socket is stale/corrupted: starting a fresh QR session
+            # while the old one is still alive gives Baileys two owners of the
+            # same WhatsApp device and can corrupt Signal ratchets (Bad MAC).
             if old_session.session_id:
                 provider = get_provider(account)
                 try:
                     provider.disconnect(account, old_session.session_id)
                 except ProviderError as exc:
                     logger.warning(
-                        "Failed to disconnect stale provider session_id=%s for account_id=%s before refresh: %s",
+                        "Failed to disconnect provider session_id=%s for account_id=%s before refresh: %s",
                         old_session.session_id, account.pk, exc.message,
                     )
+            old_session.status = (
+                WhatsAppConnectionSession.Status.EXPIRED
+                if old_session.status in (
+                    WhatsAppConnectionSession.Status.CONNECTING,
+                    WhatsAppConnectionSession.Status.QR_READY,
+                )
+                else WhatsAppConnectionSession.Status.DISCONNECTED
+            )
+            old_session.save(update_fields=["status", "updated_at"])
+            cache.delete(_qr_cache_key(old_session.pk))
         return cls.start_connection(account)
 
     @classmethod
@@ -411,18 +420,39 @@ class ConnectionManager:
         return None
 
     @classmethod
-    def send_text_message(cls, account, to: str, body: str) -> SendResult:
+    def send_text_message(cls, account, to: str, body: str, operation_id: str = "") -> SendResult:
         blocked = cls._require_connected(account)
         if blocked:
             return blocked
-        return get_provider(account).send_text_message(account, to, body)
+        return get_provider(account).send_text_message(account, to, body, operation_id=operation_id)
 
     @classmethod
-    def send_media_message(cls, account, to, media_type, media_link, caption=None, filename=None) -> SendResult:
+    def send_media_message(cls, account, to, media_type, media_link, caption=None, filename=None,
+                           operation_id: str = "") -> SendResult:
         blocked = cls._require_connected(account)
         if blocked:
             return blocked
-        return get_provider(account).send_media_message(account, to, media_type, media_link, caption, filename)
+        return get_provider(account).send_media_message(
+            account, to, media_type, media_link, caption, filename, operation_id=operation_id,
+        )
+
+    @classmethod
+    def get_send_operation_status(cls, account, operation_id: str) -> dict | None:
+        """
+        What became of one send, by its operation id -- for the recovery sweep.
+
+        Returns None when the provider offers no such lookup (see
+        WhatsAppProvider.get_send_operation_status). Never raises: a provider
+        that blows up here is reported as unreachable so the sweep marks the
+        message UNKNOWN rather than failing the whole run.
+        """
+        try:
+            return get_provider(account).get_send_operation_status(account, operation_id)
+        except ProviderError as exc:
+            logger.warning(
+                "Operation status lookup failed for account_id=%s: %s", account.pk, exc.message,
+            )
+            return {"unreachable": True}
 
     @classmethod
     def supports_interactive_buttons(cls, account) -> bool:
@@ -430,15 +460,87 @@ class ConnectionManager:
         return bool(get_provider(account).supports_interactive_buttons)
 
     @classmethod
-    def send_interactive_message(cls, account, to: str, body: str, buttons: list) -> SendResult:
-        blocked = cls._require_connected(account)
-        if blocked:
-            return blocked
-        return get_provider(account).send_interactive_message(account, to, body, buttons)
+    def capabilities(cls, account) -> dict:
+        """
+        What this account's connection can actually deliver.
+
+        The one way anything outside ``providers/`` asks the question -- the
+        composer, the campaign pre-flight and the send path all read this, so
+        there is a single answer rather than three that can drift apart.
+        """
+        return get_provider(account).capabilities()
 
     @classmethod
-    def send_template_message(cls, account, to, template_name, language_code, components=None) -> SendResult:
+    def supports(cls, account, capability: str) -> bool:
+        """
+        One capability by name, e.g. ``supports(account, "polls")``.
+
+        Unknown names are False rather than an error: a caller asking about a
+        capability this deployment has never heard of is asking about
+        something the connection certainly cannot do.
+        """
+        return bool(cls.capabilities(account).get(capability, False))
+
+    @classmethod
+    def send_interactive_message(cls, account, to: str, body: str, buttons: list,
+                                 operation_id: str = "") -> SendResult:
         blocked = cls._require_connected(account)
         if blocked:
             return blocked
-        return get_provider(account).send_template_message(account, to, template_name, language_code, components)
+        return get_provider(account).send_interactive_message(
+            account, to, body, buttons, operation_id=operation_id,
+        )
+
+    @classmethod
+    def send_list_message(cls, account, to: str, body: str, list_content: dict,
+                          operation_id: str = "") -> SendResult:
+        blocked = cls._require_connected(account)
+        if blocked:
+            return blocked
+        return get_provider(account).send_list_message(
+            account, to, body, list_content, operation_id=operation_id,
+        )
+
+    @classmethod
+    def send_poll_message(cls, account, to: str, poll_content: dict, operation_id: str = "") -> SendResult:
+        blocked = cls._require_connected(account)
+        if blocked:
+            return blocked
+        return get_provider(account).send_poll_message(account, to, poll_content, operation_id=operation_id)
+
+    @classmethod
+    def send_template_message(cls, account, to, template_name, language_code, components=None,
+                              operation_id: str = "") -> SendResult:
+        blocked = cls._require_connected(account)
+        if blocked:
+            return blocked
+        return get_provider(account).send_template_message(
+            account, to, template_name, language_code, components, operation_id=operation_id,
+        )
+
+    # -- Lookups --------------------------------------------------------------
+    #
+    # A send answers "not connected" with a failed SendResult because a send
+    # has an outcome to record. A lookup has nothing to record, so these
+    # raise, and the caller (a view or a task) decides what to tell the user.
+
+    @staticmethod
+    def _require_connected_or_raise(account) -> None:
+        if account.status != account.Status.CONNECTED:
+            raise ProviderError("WhatsApp account is not connected.", code="not_connected")
+
+    @classmethod
+    def check_numbers(cls, account, phones: list[str]):
+        """Which of ``phones`` are on WhatsApp -- see WhatsAppProvider.check_numbers."""
+        cls._require_connected_or_raise(account)
+        return get_provider(account).check_numbers(account, phones)
+
+    @classmethod
+    def list_groups(cls, account):
+        cls._require_connected_or_raise(account)
+        return get_provider(account).list_groups(account)
+
+    @classmethod
+    def get_group_members(cls, account, group_ids: list[str]):
+        cls._require_connected_or_raise(account)
+        return get_provider(account).get_group_members(account, group_ids)

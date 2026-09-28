@@ -24,7 +24,7 @@ export default function DataTable({ columns, rows, rowKey = (row) => row.id, onR
     if (!rows.length && empty) return empty;
 
     return (
-        <div className="bg-white border border-ink-200 rounded-card shadow-card overflow-hidden">
+        <div className="bg-surface border border-ink-200 rounded-card shadow-card overflow-hidden">
             <div className="scroll-x">
                 <table className="w-full text-sm border-collapse">
                     <thead>

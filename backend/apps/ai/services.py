@@ -14,11 +14,38 @@ import logging
 from django.conf import settings
 from django.utils import timezone
 
-from . import knowledge
+from . import agent, knowledge, tools
 from .models import AIAgentConfig, AIConversationState, AIUsageLog
-from .providers.anthropic import AIProviderError, complete
+from .providers.registry import AIProviderError, complete, credentials
 
-logger = logging.getLogger("multisender")
+logger = logging.getLogger("sendstack")
+
+#: The plan switch every path in this module is behind.
+FEATURE = "ai_agent"
+
+
+def agent_available(tenant_id) -> bool:
+    """
+    Whether this tenant's plan includes the AI agent.
+
+    Asked at *execution* time, in every one of the handful of functions below
+    that can actually call a model -- not once at the top of the request. An
+    agent configured while the feature was included must stop the moment it
+    is not, and the request that starts a reply is very often not a request
+    at all: it is a webhook, a Celery task, or a workflow node reached three
+    steps after somebody sent a message.
+    """
+    from apps.subscriptions.services import feature_enabled
+
+    return feature_enabled(tenant_id, FEATURE)
+
+
+def require_agent(tenant_id) -> None:
+    """The same question, raising the API error, for the paths a person is waiting on."""
+    from apps.subscriptions.services import require_feature
+
+    require_feature(tenant_id, FEATURE)
+
 
 # The model is told to answer with exactly this when it cannot help. A
 # sentinel is used rather than guessing from the wording because "I'm not
@@ -42,8 +69,151 @@ reply with exactly {handoff} and nothing else. Handing over is always better tha
 _KNOWLEDGE_ONLY = """
 Answer only from the reference material below. If it does not contain the answer, reply with exactly {handoff}."""
 
+#: The strict form, used when AI_KNOWLEDGE_ONLY is on. It differs from the
+#: instruction above in three ways that each close a specific hole seen in
+#: practice:
+#:
+#: * It names pretrained knowledge and forbids it outright. "Answer only from
+#:   the reference material" reads to a model as a preference, and a model that
+#:   knows a plausible refund window will supply it.
+#: * It says the reference material outranks the conversation. Without that, an
+#:   agent that said "14 days" earlier in the thread keeps saying it after the
+#:   document has been corrected to 19 -- the thread is right there in the
+#:   context and looks like agreement with itself.
+#: * It gives one exact sentence to refuse with, so a refusal is recognisable
+#:   rather than a hedge the customer reads as a soft yes.
+_STRICT_KNOWLEDGE_ONLY = """
+You are a Knowledge Base assistant.
+
+Answer the customer's question using ONLY the information in the reference material below.
+
+- Do not use your own pretrained or general knowledge to answer any factual question.
+- Do not guess, infer, estimate or fill a gap with something that sounds likely.
+- Do not carry a fact over from earlier in this conversation. The reference material below is the
+  only authority: where the conversation and the reference material disagree, the reference
+  material is correct and what was said earlier was wrong.
+- Facts about our products, prices, stock, policies, timings and procedures come from the
+  reference material and from nowhere else.
+
+If the reference material does not contain enough to answer, reply with exactly:
+{refusal}
+
+Do not add anything to that sentence, and do not follow it with a guess."""
+
+#: The knowledge-only rule, restated for an agent that has tools. Without this
+#: the two instructions contradict each other -- "answer only from the
+#: reference material below" forbids using what `search_knowledge` just
+#: returned, and a model resolving that conflict picks one at random. The
+#: sources widen; the prohibition on inventing does not.
+_KNOWLEDGE_ONLY_WITH_TOOLS = """
+Answer only from the reference material below and from what your tools return to you. If neither
+covers it, do not guess -- use the hand_to_human tool."""
+
+#: How an agent with tools is told to use them. Deliberately short: a long
+#: list of rules about when to call a tool competes with the tool
+#: descriptions, which are where that belongs and where the model looks.
+_TOOL_NOTE = """
+You have tools. Use them when they would give you a real answer instead of a guess -- look
+something up rather than inventing it, and check our records before saying you cannot help.
+Do not narrate the tool call to the customer; just use it and answer. Never claim to have done
+something unless the tool actually reported that it worked."""
+
+#: The tool note for a strict agent. The ordinary one invites the model to
+#: "look something up rather than inventing it", which is right but incomplete
+#: here: it does not say what to do when the lookup comes back empty, and an
+#: agent told only to prefer tools treats an empty result as permission to fall
+#: back on itself. This closes that -- a tool that returns nothing is a reason
+#: to refuse, not a reason to answer from memory.
+_STRICT_TOOL_NOTE = """
+You have tools. Use search_knowledge whenever the customer asks a factual question you have not
+already been given the answer to, and lookup_customer for anything about this person's own record.
+
+What a tool returns counts as reference material and may be used. What a tool does NOT return is
+not available to you: if a search comes back empty, or returns nothing that answers the question,
+you still cannot answer it from your own knowledge. Reply with exactly:
+{refusal}
+
+Never use a tool's silence as licence to guess, and never claim to have done something unless the
+tool reported that it worked. Do not narrate tool calls to the customer."""
+
 _NO_KNOWLEDGE_FOUND = """
 There is no reference material for this question."""
+
+#: The strict version of the same. Reached only by a caller that generates
+#: without retrieval (`suggest_reply`, which drafts for a human to check);
+#: `answer` never gets this far with nothing, because the relevance gate stops
+#: it first. Spelled out anyway, so the one path that can reach it refuses
+#: rather than improvises.
+_STRICT_NO_KNOWLEDGE_FOUND = """
+There is NO reference material for this question. You therefore cannot answer it. Reply with
+exactly: {refusal}"""
+
+
+def knowledge_only(config) -> bool:
+    """
+    Whether this reply must come from the knowledge base and nothing else.
+
+    Deployment first, tenant second: `AI_KNOWLEDGE_ONLY` is the operator saying
+    "no agent on this install invents anything", and a tenant switch that could
+    turn that back off would make it a suggestion rather than a policy. With
+    the deployment setting off this is exactly the tenant's own choice, which
+    is the behaviour every existing install has.
+    """
+    if getattr(settings, "AI_KNOWLEDGE_ONLY", False):
+        return True
+    return bool(getattr(config, "answer_from_knowledge_only", False))
+
+
+def relevance_floor(config) -> float:
+    """
+    How relevant retrieval must be before the model is called, 0-1.
+
+    The tenant's own threshold, but never below the deployment's while strict
+    mode is on -- otherwise "answer only from the documents" could be defeated
+    by setting the tenant's own bar to zero, which is a setting a user can
+    reach from a form.
+    """
+    tenant_floor = max(float(getattr(config, "min_relevance", 0) or 0), 0.0)
+    if getattr(settings, "AI_KNOWLEDGE_ONLY", False):
+        deployment_floor = max(float(getattr(settings, "AI_KNOWLEDGE_MIN_RELEVANCE", 0) or 0), 0.0)
+        return max(tenant_floor, deployment_floor)
+    return tenant_floor
+
+
+def refusal_message(config) -> str:
+    """The exact sentence a strict agent refuses with."""
+    message = (getattr(config, "knowledge_only_message", "") or "").strip()
+    return message or "I couldn't find this information in the Knowledge Base."
+
+
+def is_refusal(text, config) -> bool:
+    """
+    Whether the model's reply is the strict refusal rather than an answer.
+
+    This is the second half of knowledge-only enforcement, and it exists
+    because the relevance gate cannot be the whole of it. The gate stops
+    questions the documents plainly do not touch; it cannot stop a question
+    that *looks* related. "What is the company warranty period?" shares
+    "company" and "period" with a refund policy, scores well above any sane
+    threshold, and reaches the model -- which is correct, because the only
+    thing that can tell whether a refund policy answers a warranty question is
+    something that can read them both.
+
+    So the model is given one exact sentence to say when it cannot answer, and
+    that sentence is recognised here and turned into a real refusal: the reply
+    is not sent as an answer, nothing is recorded as answered, and the
+    tenant's configured fallback runs. Matched on the sentence rather than
+    guessed at from wording, for the reason `HANDOFF_TOKEN` exists -- "I'm not
+    sure, but..." and "I'm not sure -- let me check" mean opposite things.
+    """
+    refusal = refusal_message(config).strip().lower().rstrip(".")
+    cleaned = (text or "").strip().lower().rstrip(".")
+    if not refusal or not cleaned:
+        return False
+    # `startswith` as well as equality: a model told to reply with exactly one
+    # sentence will usually comply and occasionally add a courtesy after it.
+    # Both are refusals, and neither should be relayed as an answer.
+    return cleaned == refusal or cleaned.startswith(refusal)
 
 #: How the agent is to treat what the CRM knows about the person it is
 #: talking to. Spelled out because the two kinds of fact behave differently
@@ -60,13 +230,29 @@ Never read this back to the customer as a list, never mention scores, internal s
 who owns the account, and never tell them what our team has been asked to do about them."""
 
 
+def resolved(config):
+    """
+    The key, model and endpoint this config's next call will actually use.
+
+    Everything that needs to know what the agent is configured with -- the send
+    path, the "is it configured?" check, the status panel -- goes through here,
+    so a tenant reading "gpt-4o-mini" on the dashboard is reading the model
+    that will answer the next customer rather than the contents of a field.
+    """
+    return credentials(
+        config.provider, api_key=config.get_api_key(), model=config.model, base_url=config.base_url,
+    )
+
+
 def _api_key(config) -> str | None:
-    return config.get_api_key() or getattr(settings, "AI_API_KEY", "") or None
+    return resolved(config).api_key
 
 
 def is_configured(config=None, tenant_id=None) -> bool:
     """Whether the agent could actually run: enabled, and with a key to run with."""
     config = config or AIAgentConfig.for_tenant(tenant_id)
+    if config.provider == AIAgentConfig.Provider.CUSTOM and not config.base_url:
+        return False
     return bool(config.is_enabled and _api_key(config))
 
 
@@ -100,7 +286,7 @@ def customer_context(conversation):
         return None
 
 
-def build_system_prompt(config, chunks, *, customer=None, profile=None) -> str:
+def build_system_prompt(config, chunks, *, customer=None, profile=None, with_tools=False) -> str:
     """
     Everything the agent is told before it sees the conversation.
 
@@ -127,22 +313,48 @@ def build_system_prompt(config, chunks, *, customer=None, profile=None) -> str:
     if config.business_context.strip():
         parts.append(f"\nAbout this business:\n{config.business_context.strip()}")
 
-    if config.answer_from_knowledge_only:
-        parts.append(_KNOWLEDGE_ONLY.format(handoff=HANDOFF_TOKEN))
+    strict = getattr(settings, "AI_KNOWLEDGE_ONLY", False)
+    if strict:
+        # The strict instruction replaces both of the softer ones, including
+        # the with-tools variant: what a tool returns is knowledge-base
+        # material too (see `_STRICT_TOOL_NOTE`), so there is no conflict left
+        # for a separate instruction to resolve.
+        parts.append(_STRICT_KNOWLEDGE_ONLY.format(refusal=refusal_message(config)))
+    elif config.answer_from_knowledge_only:
+        parts.append(
+            _KNOWLEDGE_ONLY_WITH_TOOLS if with_tools else _KNOWLEDGE_ONLY.format(handoff=HANDOFF_TOKEN)
+        )
+
+    if with_tools:
+        parts.append(_STRICT_TOOL_NOTE.format(refusal=refusal_message(config)) if strict else _TOOL_NOTE)
 
     if customer:
         parts.append(f"\nWho you are talking to:\n{customer.to_prompt()}")
         parts.append(_CUSTOMER_NOTE)
 
     if chunks:
+        # Each passage is labelled with its citation rather than just its
+        # document title, so the model can say *which* document and page an
+        # answer came from, and so two passages from one file are
+        # distinguishable in the context.
         references = "\n\n".join(
-            f"[{chunk.document.title}]\n{chunk.content}" for chunk in chunks
+            f"[{_reference_label(chunk)}]\n{chunk.content}" for chunk in chunks
         )
         parts.append(f"\nReference material:\n{references}")
+    elif strict:
+        parts.append(_STRICT_NO_KNOWLEDGE_FOUND.format(refusal=refusal_message(config)))
     elif config.answer_from_knowledge_only:
         parts.append(_NO_KNOWLEDGE_FOUND)
 
     return "\n".join(parts)
+
+
+def _reference_label(chunk) -> str:
+    """How one retrieved passage is named in the prompt. Never raises."""
+    try:
+        return chunk.citation or chunk.document.title
+    except Exception:  # noqa: BLE001 - a missing document must not cost the reply
+        return "reference"
 
 
 def build_history(conversation, limit):
@@ -186,8 +398,11 @@ def build_history(conversation, limit):
 
 
 def _log(config, conversation, outcome, response=None, error=""):
+    # The resolved model, not the stored field: with OPENAI_MODEL supplying it
+    # the field is often blank, and a usage log that cannot say which model
+    # spent the tokens is not a usage log.
     AIUsageLog.objects.create(
-        tenant_id=config.tenant_id, conversation=conversation, model=config.model, outcome=outcome,
+        tenant_id=config.tenant_id, conversation=conversation, model=resolved(config).model[:100], outcome=outcome,
         input_tokens=getattr(response, "input_tokens", 0) or 0,
         output_tokens=getattr(response, "output_tokens", 0) or 0,
         latency_ms=getattr(response, "latency_ms", 0) or 0,
@@ -196,9 +411,12 @@ def _log(config, conversation, outcome, response=None, error=""):
 
 
 def _ask(config, system, messages, *, max_tokens=None):
+    settings_for_call = resolved(config)
     return complete(
-        api_key=_api_key(config),
-        model=config.model,
+        provider=config.provider,
+        api_key=settings_for_call.api_key,
+        model=settings_for_call.model,
+        base_url=settings_for_call.base_url,
         system=system,
         messages=messages,
         max_tokens=max_tokens or config.max_output_tokens,
@@ -357,6 +575,34 @@ def _send_fallback(conversation, config, retrieval, inbound_message, question) -
     """
     action = getattr(config, "fallback_action", AIAgentConfig.Fallback.HANDOFF)
 
+    # In strict mode the customer is told, in one plain sentence, that this is
+    # not in the knowledge base -- rather than handed a friendlier phrasing
+    # that leaves them unsure whether they were answered. Handing over is still
+    # a handover; it is the *wording* of the "we don't know" replies that this
+    # replaces, so "Ask support" and "Notify the team" keep doing their extra
+    # work and only their text changes.
+    if getattr(settings, "AI_KNOWLEDGE_ONLY", False) and action != AIAgentConfig.Fallback.HANDOFF:
+        if action == AIAgentConfig.Fallback.NOTIFY_TEAM:
+            _notify_team(conversation, question)
+
+        from apps.automation.services import send_automated_message
+        from apps.messaging.models import Message
+
+        body = refusal_message(config)
+        sent = send_automated_message(
+            conversation.whatsapp_account, conversation.contact,
+            {"message_type": Message.MessageType.TEXT, "body": body},
+            conversation=conversation, reference=f"ai:fallback:{conversation.pk}", kind=Message.Kind.SERVICE,
+        )
+        _record_answer(
+            config, conversation, inbound_message, retrieval,
+            question=question, answer_text=body, message=sent, fallback=action,
+        )
+        logger.info(
+            "Knowledge base had nothing for conversation %s; refused (knowledge-only).", conversation.pk,
+        )
+        return False
+
     if action == AIAgentConfig.Fallback.HANDOFF:
         if config.handoff_enabled:
             hand_off(conversation, config, "the knowledge base does not cover this")
@@ -506,6 +752,104 @@ def _log_crm(config, conversation, question, retrieval) -> None:
         logger.exception("Could not record the knowledge question on contact %s", getattr(contact, "pk", None))
 
 
+#: Openings that mean "still on the last subject": the question does not name
+#: what it is about because the previous message already did.
+_FOLLOW_UP_OPENERS = (
+    "and ", "also ", "so ", "then ", "what about", "how about", "and what", "and how",
+    "ok and", "okay and", "but ", "plus ",
+)
+
+#: Words that stand in for a subject named earlier. A question whose only noun
+#: is one of these is not a question a retrieval can answer on its own.
+_ANAPHORA = {"it", "that", "this", "them", "those", "these", "they", "one", "ones", "same"}
+
+
+def _is_follow_up(question: str) -> bool:
+    """
+    Whether this question leans on the previous one for its subject.
+
+    Deliberately narrow. Widening a retrieval with the conversation is useful
+    for "and how long does it take?" and actively harmful for "do you sell
+    helicopters?" -- the second is a complete question that the documents
+    simply do not answer, and letting it ride on the previous message's terms
+    would retrieve the *last* subject and answer a question nobody asked. That
+    is a hallucination with a citation attached, which is worse than a refusal.
+    So the signal has to be an explicit one, not "the question scored badly".
+    """
+    lowered = (question or "").strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith(_FOLLOW_UP_OPENERS):
+        return True
+    # No opener, but no subject of its own either: every content word is a
+    # stand-in for something named earlier.
+    terms = knowledge.tokenize(lowered)
+    return bool(terms) and len(terms) <= 4 and all(term in _ANAPHORA for term in terms)
+
+
+def _previous_questions(conversation, current_message_id=None, limit=2) -> list:
+    """
+    The customer's own recent messages, newest last.
+
+    Read from the messages directly rather than through `build_history`, which
+    merges consecutive turns from the same role -- correct for a transcript,
+    and wrong here, where three messages in a row from one customer are three
+    separate attempts at a subject.
+
+    Only their words: our own replies quote the knowledge base back, so
+    including them would retrieve the passage already used instead of the one
+    the follow-up is reaching for.
+    """
+    from apps.messaging.models import Message
+
+    messages = (
+        Message.objects.filter(conversation=conversation, direction=Message.Direction.INBOUND)
+        .exclude(status=Message.Status.FAILED)
+        .exclude(pk=current_message_id)
+        .order_by("-queued_at", "-id")
+        .values_list("body", flat=True)[:limit]
+    )
+    return [body.strip() for body in reversed(list(messages)) if (body or "").strip()]
+
+
+def retrieve_in_context(conversation, question, config, *, current_message_id=None):
+    """
+    Retrieve for `question`, reading the thread when the question needs it.
+
+    "And how long does processing take?" is perfectly clear to the person who
+    asked it and almost meaningless to a retrieval: the subject is a message
+    earlier. Searched alone it finds nothing, the relevance gate fires, and a
+    customer mid-conversation is told their follow-up is not in the knowledge
+    base -- which reads as the assistant losing the thread, because it is.
+
+    The widened pass runs only for a question that actually leans on the one
+    before it (see `_is_follow_up`) and only when it did badly alone, and its
+    result is used only if it is better. So a self-contained question keeps
+    exactly the retrieval it had before this existed.
+    """
+    retrieval = knowledge.retrieve(
+        conversation.tenant_id, question,
+        knowledge_base_id=config.knowledge_base_id, limit=config.knowledge_chunks,
+    )
+    if retrieval.relevance >= relevance_floor(config) or not _is_follow_up(question):
+        return retrieval
+
+    try:
+        previous = _previous_questions(conversation, current_message_id)
+    except Exception:  # noqa: BLE001 - context is a bonus, never the reply's price
+        logger.exception("Could not read conversation %s for context retrieval", conversation.pk)
+        return retrieval
+
+    if not previous:
+        return retrieval
+
+    widened = knowledge.retrieve(
+        conversation.tenant_id, f"{' '.join(previous)} {question}",
+        knowledge_base_id=config.knowledge_base_id, limit=config.knowledge_chunks,
+    )
+    return widened if widened.relevance > retrieval.relevance else retrieval
+
+
 def answer(conversation, inbound_message, *, config=None) -> bool:
     """
     Produce and send one reply. Returns whether the agent said anything.
@@ -526,6 +870,17 @@ def answer(conversation, inbound_message, *, config=None) -> bool:
     normal automation path (keyword rules, workflows) is never disturbed by
     the agent declining to speak.
     """
+    # Before `should_answer`, and before anything is read or logged: a plan
+    # without the agent has no agent, so there is nothing here to decline.
+    # This is the choke point every automated reply passes through -- the
+    # inbound ladder, the Celery task, and a workflow's AI_REPLY node all
+    # arrive here -- which is why it is the one that matters most.
+    if not agent_available(conversation.tenant_id):
+        logger.info(
+            "AI did not answer conversation %s: the plan does not include the AI agent.", conversation.pk,
+        )
+        return False
+
     config = config or AIAgentConfig.for_tenant(conversation.tenant_id)
     permitted, reason = should_answer(conversation, config)
     if not permitted:
@@ -545,26 +900,64 @@ def answer(conversation, inbound_message, *, config=None) -> bool:
         hand_off(conversation, config, "the customer asked for a person")
         return False
 
-    retrieval = knowledge.retrieve(
-        conversation.tenant_id, question,
-        knowledge_base_id=config.knowledge_base_id, limit=config.knowledge_chunks,
+    retrieval = retrieve_in_context(
+        conversation, question, config, current_message_id=inbound_message.pk,
     )
     _log_crm(config, conversation, question, retrieval)
 
-    floor = max(float(getattr(config, "min_relevance", 0) or 0), 0.0)
-    if config.answer_from_knowledge_only and (not retrieval or retrieval.relevance < floor):
+    # Whether this tenant's agent has any tools at all. Computed once because
+    # it changes three things below: whether the relevance gate short-circuits,
+    # what the model is told, and which loop runs.
+    tool_definitions = tools.definitions(config)
+
+    # The relevance gate: retrieval has to have found something this good
+    # before the model is called at all. Below it there is nothing to answer
+    # from, so a call could only produce an invention or a refusal we can write
+    # ourselves -- and would be billed either way.
+    floor = relevance_floor(config)
+    strict = getattr(settings, "AI_KNOWLEDGE_ONLY", False)
+    below_floor = not retrieval or retrieval.relevance < floor
+
+    # Whether tools suspend the gate is exactly the AI_KNOWLEDGE_ONLY question.
+    #
+    # With it off, they do, and that is deliberate: a tool-enabled agent has
+    # real sources beyond this one retrieval -- the customer's own record, a
+    # second look at the knowledge base for a term the first query missed -- so
+    # "the documents do not cover this message" does not imply "there is
+    # nothing to find". The model is still told to hand over rather than guess,
+    # `hand_to_human` is always available, and an empty answer still lands in
+    # `_send_fallback` below.
+    #
+    # With it on, they do not. That reasoning is sound about *retrieval* and
+    # wrong about *hallucination*: it leaves the model called with an empty
+    # context and its own weights, trusting a prompt to stop it answering from
+    # them. This is the "tools must not be used to bypass the knowledge base"
+    # rule, and it is enforced here rather than in the prompt because a rule
+    # the model is merely asked to follow is not a rule.
+    gate_applies = knowledge_only(config) and (strict or not tool_definitions)
+    if gate_applies and below_floor:
         return _send_fallback(conversation, config, retrieval, inbound_message, question)
 
     system = build_system_prompt(
         config, retrieval.chunks,
         customer=customer_context(conversation), profile=business_profile(conversation.tenant_id),
+        with_tools=bool(tool_definitions),
     )
     history = build_history(conversation, config.history_messages)
     if not history:
         history = [{"role": "user", "content": question}]
 
+    turn = None
     try:
-        response = _ask(config, system, history)
+        if tool_definitions:
+            # Everything about ownership the tools will ever see, built from
+            # the conversation row. Nothing the model returns can change it.
+            turn = agent.run_turn(config, tools.for_conversation(conversation), system, history)
+            response = turn
+            text = turn.text
+        else:
+            response = _ask(config, system, history)
+            text = (response.text or "").strip()
     except AIProviderError as exc:
         # A provider outage must not leave the customer with silence: hand the
         # conversation to a person, which is what would have happened had the
@@ -575,11 +968,30 @@ def answer(conversation, inbound_message, *, config=None) -> bool:
             hand_off(conversation, config, "the assistant was unavailable")
         return False
 
-    text = (response.text or "").strip()
-    if not text or HANDOFF_TOKEN in text:
+    # The agent asked, through a tool, to be taken off this conversation. Done
+    # here rather than inside the tool so that it goes through the same
+    # `hand_off` every other handoff does -- assignment, the response clock,
+    # and the tenant's own handoff message.
+    if turn is not None and turn.terminal == tools.HANDOFF:
+        _log(config, conversation, AIUsageLog.Outcome.HANDOFF, response=turn)
+        if config.handoff_enabled:
+            hand_off(conversation, config, turn.terminal_reason or "the assistant asked for a person")
+            _record_answer(
+                config, conversation, inbound_message, retrieval,
+                question=question, fallback=AIAgentConfig.Fallback.HANDOFF,
+            )
+            return False
+        # Handing over is switched off, so the customer would otherwise get
+        # silence from an agent that has just decided it cannot help.
+        return _send_fallback(conversation, config, retrieval, inbound_message, question)
+
+    if not text or HANDOFF_TOKEN in text or (strict and is_refusal(text, config)):
         _log(config, conversation, AIUsageLog.Outcome.HANDOFF, response=response)
         # The model read the retrieved material and still could not answer,
-        # which is exactly the case the fallback exists for.
+        # which is exactly the case the fallback exists for. In strict mode
+        # that verdict most often arrives as the refusal sentence rather than
+        # the handoff token, because the retrieved material was related enough
+        # to reach the model and still did not contain the answer.
         return _send_fallback(conversation, config, retrieval, inbound_message, question)
 
     from apps.automation.services import send_automated_message
@@ -629,6 +1041,7 @@ def ask(tenant_id, question: str, *, knowledge_base_id=None, config=None) -> dic
     different code path would be worse than no test, because it would build
     confidence in behaviour that is not the behaviour.
     """
+    require_agent(tenant_id)
     config = config or AIAgentConfig.for_tenant(tenant_id)
     retrieval = knowledge.retrieve(
         tenant_id, question,
@@ -649,8 +1062,13 @@ def ask(tenant_id, question: str, *, knowledge_base_id=None, config=None) -> dic
         "detail": "",
     }
 
-    floor = max(float(getattr(config, "min_relevance", 0) or 0), 0.0)
+    # The same gate the customer-facing path applies, read from the same two
+    # helpers -- a test panel that used a laxer threshold would answer
+    # questions here that go unanswered on WhatsApp, which is worse than not
+    # having a test panel.
+    floor = relevance_floor(config)
     if not retrieval or retrieval.relevance < floor:
+        result["answer"] = refusal_message(config) if getattr(settings, "AI_KNOWLEDGE_ONLY", False) else ""
         result["detail"] = (
             "Nothing in this knowledge base is close enough to answer that. On WhatsApp the customer would "
             "get your fallback instead."
@@ -676,7 +1094,9 @@ def ask(tenant_id, question: str, *, knowledge_base_id=None, config=None) -> dic
 
     text = (response.text or "").strip()
     _log(config, None, AIUsageLog.Outcome.ANSWERED, response=response)
-    if not text or HANDOFF_TOKEN in text:
+    strict = getattr(settings, "AI_KNOWLEDGE_ONLY", False)
+    if not text or HANDOFF_TOKEN in text or (strict and is_refusal(text, config)):
+        result["answer"] = refusal_message(config) if strict else ""
         result["detail"] = (
             "The assistant read the material and decided it could not answer, so the customer would get "
             "your fallback."
@@ -701,6 +1121,11 @@ def maybe_reply(inbound_message) -> bool:
     if conversation is None or not is_configured(tenant_id=conversation.tenant_id):
         return False
 
+    # Checked here as well as inside `answer` so a plan without the agent
+    # queues no work at all, rather than paying for a worker to find out.
+    if not agent_available(conversation.tenant_id):
+        return False
+
     from .tasks import generate_reply_task
 
     generate_reply_task.delay(inbound_message.pk)
@@ -719,6 +1144,7 @@ def suggest_reply(conversation) -> str:
     suggestion has already decided the agent should be involved, and the
     conversation being assigned to them is the reason they are asking.
     """
+    require_agent(conversation.tenant_id)
     config = AIAgentConfig.for_tenant(conversation.tenant_id)
     if not _api_key(config):
         raise AIProviderError("No API key is configured for the AI agent.")
@@ -730,7 +1156,16 @@ def suggest_reply(conversation) -> str:
     last_customer_message = next(
         (turn["content"] for turn in reversed(history) if turn["role"] == "user"), "",
     )
-    chunks = knowledge.search(conversation.tenant_id, last_customer_message, limit=config.knowledge_chunks)
+    # Retrieved through the same gate the customer-facing path uses. A draft
+    # built from material too weak to answer with is a draft that quietly
+    # invents, and it is more dangerous than a live reply, not less: an agent
+    # reading a fluent suggestion is being asked to spot a fabrication in
+    # somebody else's words.
+    suggestion_retrieval = knowledge.retrieve(
+        conversation.tenant_id, last_customer_message,
+        knowledge_base_id=config.knowledge_base_id, limit=config.knowledge_chunks,
+    )
+    chunks = suggestion_retrieval.chunks if suggestion_retrieval.relevance >= relevance_floor(config) else []
 
     system = build_system_prompt(
         config, chunks,
@@ -755,6 +1190,7 @@ def suggest_reply(conversation) -> str:
 
 def summarise(conversation) -> str:
     """A few lines an agent can read instead of scrolling a long thread."""
+    require_agent(conversation.tenant_id)
     config = AIAgentConfig.for_tenant(conversation.tenant_id)
     if not _api_key(config):
         raise AIProviderError("No API key is configured for the AI agent.")
