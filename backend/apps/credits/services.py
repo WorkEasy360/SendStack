@@ -197,11 +197,26 @@ def reclaim_credits_on_delete(*, target, actor):
         return amount
 
 
+def is_credit_exempt(user) -> bool:
+    """
+    Whether this account sends without spending credits.
+
+    Superadmins mint credits for everybody else (see `assign_credits`), so
+    making them hold a balance of their own to send would only mean granting
+    credits to themselves first. Their sends skip the reservation entirely and
+    never draw the balance down; plan allowances and every check in the send
+    gate still apply to them as to anybody.
+    """
+    return user.role == user.Role.SUPERADMIN
+
+
 def reserve_credits(*, user_id: int, amount: int, reference: str = "") -> None:
     if amount <= 0:
         return
     with transaction.atomic():
         locked = User.objects.select_for_update().get(pk=user_id)
+        if is_credit_exempt(locked):
+            return
         available = locked.credits - locked.reserved_credits
         if available < amount:
             raise InsufficientCreditsError(f"This requires {amount} credits but only {available} are available.")
@@ -258,7 +273,9 @@ def consume_credit(*, user_id: int, amount: int = 1, reference: str = "", operat
             return
         locked.reserved_credits -= min(amount, locked.reserved_credits)
         before = locked.credits
-        locked.credits = max(0, before - amount)
+        # Still recorded for an exempt account -- the row is both the usage
+        # trail and this message's fire-once handle -- but nothing is spent.
+        locked.credits = before if is_credit_exempt(locked) else max(0, before - amount)
         locked.save(update_fields=["credits", "reserved_credits"])
         _record(
             account=locked, from_account=locked, to_account=None, amount=amount,

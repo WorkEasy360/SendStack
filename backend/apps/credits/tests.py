@@ -186,6 +186,34 @@ class ReservationServiceTests(HierarchyFixture):
         self.assertEqual(types, [CreditTransaction.Type.RESERVE, CreditTransaction.Type.CONSUME, CreditTransaction.Type.RELEASE])
 
 
+class SuperadminExemptionTests(HierarchyFixture):
+    def test_superadmin_reserves_without_any_balance(self):
+        reserve_credits(user_id=self.superadmin.pk, amount=1000, reference="campaign:1")
+
+        self.superadmin.refresh_from_db()
+        self.assertEqual(self.superadmin.credits, 0)
+        self.assertEqual(self.superadmin.reserved_credits, 0)
+        self.assertFalse(CreditTransaction.objects.filter(account=self.superadmin).exists())
+
+    def test_superadmin_sends_never_draw_down_their_balance(self):
+        self.superadmin.credits = 5
+        self.superadmin.save(update_fields=["credits"])
+
+        consume_credit(user_id=self.superadmin.pk, reference="message:1", operation_id="message:1:consume")
+
+        self.superadmin.refresh_from_db()
+        self.assertEqual(self.superadmin.credits, 5)
+        txn = CreditTransaction.objects.get(account=self.superadmin)
+        self.assertEqual(txn.type, CreditTransaction.Type.CONSUME)
+        self.assertEqual((txn.balance_before, txn.balance_after), (5, 5))
+
+    def test_other_roles_still_need_credits(self):
+        with self.assertRaises(InsufficientCreditsError):
+            reserve_credits(user_id=self.reseller.pk, amount=1, reference="campaign:1")
+        with self.assertRaises(InsufficientCreditsError):
+            reserve_credits(user_id=self.user.pk, amount=1, reference="campaign:1")
+
+
 class CreditsApiTests(HierarchyFixture):
     def setUp(self):
         super().setUp()

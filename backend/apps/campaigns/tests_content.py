@@ -137,6 +137,22 @@ class CampaignContentTests(TestCase):
 
         self.assertEqual(Message.objects.filter(campaign=campaign).count(), 0)
 
+    def test_a_superadmin_launches_and_sends_with_no_credits_at_all(self):
+        self.user.role = get_user_model().Role.SUPERADMIN
+        self.user.credits = 0
+        self.user.save(update_fields=["role", "credits"])
+        campaign = self._campaign(list_content=LIST_CONTENT)
+
+        with patch(
+            "apps.messaging.services.ConnectionManager.send_list_message", side_effect=_sent,
+        ):
+            launch(campaign)
+
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.messages.filter(status=Message.Status.SENT).count(), 3)
+        self.user.refresh_from_db()
+        self.assertEqual((self.user.credits, self.user.reserved_credits), (0, 0))
+
     def test_an_unsubscribed_contact_never_gets_a_list_message(self):
         """The audience filter is the send path's own; content type changes nothing."""
         Contact.objects.filter(phone="+919876543210").update(subscribed=False)
