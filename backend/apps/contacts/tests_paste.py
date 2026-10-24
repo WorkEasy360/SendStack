@@ -122,6 +122,25 @@ class CountryCodeTests(TestCase):
 
         self.assertEqual(rows[0]["phone"], "+91919191919")
 
+    def test_a_ten_digit_number_starting_with_91_is_the_contacts_own_number(self):
+        """
+        The reported bug. 9112345678 is an ordinary Indian mobile; its 91 is
+        part of the number, and it used to be read as +91 12345678.
+        """
+        rows = parse("9112345678\n9198765432", default_country_code="91")
+
+        self.assertEqual([row["phone"] for row in rows], ["+919112345678", "+919198765432"])
+
+    def test_more_than_ten_digits_starting_with_91_already_carries_the_code(self):
+        rows = parse("919112345678", default_country_code="91")
+
+        self.assertEqual(rows[0]["phone"], "+919112345678")
+
+    def test_a_trunk_zero_is_dropped_before_the_code_goes_on(self):
+        rows = parse("09876543210\n0 91123 45678", default_country_code="91")
+
+        self.assertEqual([row["phone"] for row in rows], ["+919876543210", "+919112345678"])
+
     def test_an_explicit_plus_is_never_touched_by_the_default(self):
         rows = parse("+14155552671", default_country_code="91")
 

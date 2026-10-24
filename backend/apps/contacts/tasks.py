@@ -10,7 +10,7 @@ from .models import ContactGroup, ContactImport, ContactTag
 # re-exported here because the streaming tests import it from this module.
 from .readers import _READ_CHUNK_BYTES, _decoded_lines, open_rows  # noqa: F401
 from .upsert import ContactQuotaReached, upsert_contact
-from .utils import normalize_phone
+from .utils import normalize_contact_phone
 
 logger = logging.getLogger("sendstack")
 
@@ -55,7 +55,7 @@ def process_contact_import(self, import_id: int):
             raw_phone = row_value(row, mapping, "phone")
 
             try:
-                phone = normalize_phone(raw_phone)
+                phone = normalize_contact_phone(raw_phone)
             except ValueError:
                 error_count += 1
                 if len(errors) < _MAX_STORED_ERRORS:

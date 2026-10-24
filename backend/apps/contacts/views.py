@@ -509,7 +509,7 @@ class ContactImportViewSet(viewsets.ModelViewSet):
         """
         from .mapping import detect_columns, row_value
         from .readers import SUPPORTED_EXTENSIONS, UnreadableFile, extension_of, open_rows
-        from .utils import normalize_phone
+        from .utils import normalize_contact_phone
 
         upload = request.FILES.get("file")
         if upload is None:
@@ -537,7 +537,7 @@ class ContactImportViewSet(viewsets.ModelViewSet):
                 total += 1
                 raw_phone = row_value(row, mapping, "phone")
                 try:
-                    phone = normalize_phone(raw_phone)
+                    phone = normalize_contact_phone(raw_phone)
                 except ValueError:
                     invalid += 1
                     continue

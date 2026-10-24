@@ -773,6 +773,15 @@ WHATSAPP_HOURLY_SEND_LIMIT = int(os.getenv("WHATSAPP_HOURLY_SEND_LIMIT", "200"))
 # which would fire an automation nobody chose.
 BUTTON_PROMPT_TIMEOUT_MINUTES = int(os.getenv("BUTTON_PROMPT_TIMEOUT_MINUTES", "30"))
 
+# Country code added to a contact number typed or imported without one (CSV,
+# Excel, the add-contact form). A number is read as the contact's own number
+# first: anything that fits in a national number gets this code in front, and
+# only a longer number already starting with it is taken as carrying it -- so
+# a ten-digit 9112345678 becomes +919112345678, not +91 12345678. A "+" or
+# "00" prefix is always left alone. Blank turns the default off. The paste
+# importer and the number filter ask for the code on screen instead.
+CONTACTS_DEFAULT_COUNTRY_CODE = os.getenv("CONTACTS_DEFAULT_COUNTRY_CODE", "91")
+
 # Lead tools (apps.leadtools): the number filter and the group grabber.
 #
 # The number filter asks WhatsApp, through a QR-linked number, which numbers

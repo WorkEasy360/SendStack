@@ -2,7 +2,7 @@ import io
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.tenants.models import Tenant
@@ -11,7 +11,7 @@ from .mapping import custom_fields_for, detect_columns
 from .models import Contact, ContactGroup, ContactImport, ContactTag
 from .segments import resolve_segment_queryset
 from .tasks import process_contact_import
-from .utils import normalize_phone
+from .utils import normalize_contact_phone, normalize_phone
 
 
 class NormalizePhoneTests(TestCase):
@@ -21,6 +21,61 @@ class NormalizePhoneTests(TestCase):
     def test_rejects_too_short_numbers(self):
         with self.assertRaises(ValueError):
             normalize_phone("12345")
+
+
+@override_settings(CONTACTS_DEFAULT_COUNTRY_CODE="91")
+class NormalizeContactPhoneTests(TestCase):
+    """The number is the contact's own first; the country code goes on after."""
+
+    def test_a_ten_digit_number_gets_the_default_code(self):
+        self.assertEqual(normalize_contact_phone("98765 43210"), "+919876543210")
+
+    def test_a_ten_digit_number_that_starts_with_91_is_still_the_contacts_own(self):
+        # It used to be stored as +9112345678: +91 followed by eight digits.
+        self.assertEqual(normalize_contact_phone("9112345678"), "+919112345678")
+
+    def test_more_than_ten_digits_starting_with_91_is_not_prefixed_again(self):
+        self.assertEqual(normalize_contact_phone("919112345678"), "+919112345678")
+
+    def test_a_trunk_zero_is_dropped(self):
+        self.assertEqual(normalize_contact_phone("09876543210"), "+919876543210")
+
+    def test_plus_and_double_zero_are_left_as_written(self):
+        self.assertEqual(normalize_contact_phone("+1 415 555 2671"), "+14155552671")
+        self.assertEqual(normalize_contact_phone("0044 7911 123456"), "+447911123456")
+
+    def test_more_than_ten_digits_is_international_whatever_it_starts_with(self):
+        # A US number written without its plus is too long to be Indian.
+        self.assertEqual(normalize_contact_phone("14155552671"), "+14155552671")
+
+    def test_a_number_escaped_by_our_own_csv_writer_keeps_its_plus(self):
+        # Exports and the lead tools write '+..., the formula-injection escape.
+        self.assertEqual(normalize_contact_phone("'+6591234567"), "+6591234567")
+
+    def test_another_countrys_length_is_respected(self):
+        # Singapore numbers are eight digits, so ten starting with 65 is +65.
+        self.assertEqual(normalize_contact_phone("6591234567", "65"), "+6591234567")
+        self.assertEqual(normalize_contact_phone("91234567", "65"), "+6591234567")
+
+    @override_settings(CONTACTS_DEFAULT_COUNTRY_CODE="")
+    def test_no_default_keeps_the_old_behaviour(self):
+        self.assertEqual(normalize_contact_phone("919876543210"), "+919876543210")
+
+    def test_csv_import_applies_the_code(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme-import-cc", kind=Tenant.Kind.CUSTOMER)
+        user = get_user_model().objects.create_user(username="acme-import-cc", password="x", tenant=tenant)
+        csv_content = "name,phone\nAman,9112345678\nRahul,919876543210\nJo,+14155552671\n"
+        contact_import = ContactImport.objects.create(
+            tenant=tenant, created_by=user,
+            file=SimpleUploadedFile("contacts.csv", csv_content.encode(), content_type="text/csv"),
+        )
+
+        process_contact_import(contact_import.pk)
+
+        self.assertEqual(
+            set(Contact.objects.filter(tenant=tenant).values_list("phone", flat=True)),
+            {"+919112345678", "+919876543210", "+14155552671"},
+        )
 
 
 class ContactApiTests(TestCase):

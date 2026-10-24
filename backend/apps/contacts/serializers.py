@@ -3,7 +3,7 @@ from rest_framework import serializers
 from core.uploads import UploadRejected, validate_upload
 
 from .models import Contact, ContactGroup, ContactImport, ContactSegment, ContactTag
-from .utils import normalize_phone
+from .utils import normalize_contact_phone
 
 
 class ContactGroupSerializer(serializers.ModelSerializer):
@@ -63,7 +63,7 @@ class ContactSerializer(serializers.ModelSerializer):
 
     def validate_phone(self, value):
         try:
-            return normalize_phone(value)
+            return normalize_contact_phone(value)
         except ValueError as exc:
             raise serializers.ValidationError("Enter a valid E.164 phone number.") from exc
 

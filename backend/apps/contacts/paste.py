@@ -30,7 +30,7 @@ number they will not recognise.
 
 import re
 
-from .utils import normalize_phone
+from .utils import apply_country_code, normalize_phone
 
 #: Row statuses, in the order they are checked. Each is a different thing to
 #: do about it, which is why they are not collapsed into "bad".
@@ -72,28 +72,6 @@ _PHONE_LIKE = re.compile(r"^[+()\s\d.\-]+$")
 #: a chat, and short of the size where this should have been a file -- the CSV
 #: importer streams, this one holds every row in memory to show them all.
 MAX_LINES = 5000
-
-#: Digits below which a number cannot be a full international number, used to
-#: decide whether a leading run that looks like a country code really is one.
-#: Seven is the shortest national number in E.164.
-_MIN_NATIONAL_DIGITS = 7
-
-#: Total digits below which a number is read as national even if it happens to
-#: begin with the default country code.
-#:
-#: Both readings of "919191919" are defensible -- a nine-digit national number,
-#: or +91 followed by a seven-digit one -- and the heuristic has to pick one.
-#: It picks national, because the paste that produces this is somebody's list
-#: of local numbers with one or two already written in full, not a list of
-#: seven-digit numbers. Ten is the shortest a full international number gets in
-#: practice once a one- or two-digit code is on the front of a nine- or
-#: ten-digit national number.
-#:
-#: Whichever way it goes, the reviewer sees the resulting number in the table
-#: before anything is created. That is what makes a heuristic acceptable here
-#: at all.
-_MIN_INTERNATIONAL_DIGITS = 10
-
 
 def _split_line(line: str) -> tuple:
     """
@@ -138,38 +116,14 @@ def _normalise(raw_phone: str, default_country_code: str) -> tuple:
     number shown in the review table either way, so the guess can be seen
     before it is acted on.
     """
-    raw = (raw_phone or "").strip()
-    if not raw:
+    # Which leading digits are a country code and which are the contact's own
+    # number is decided in one place for every way a number gets in -- see
+    # apply_country_code. A ten-digit 9112345678 used to be read here as +91
+    # followed by eight digits, silently storing somebody else's number.
+    digits = apply_country_code(raw_phone, default_country_code)
+    if digits == "":
         return "", EMPTY
-
-    digits = re.sub(r"\D", "", raw)
-    if not digits:
-        return "", EMPTY
-
-    # "00" is how much of the world writes "+". Normalising it here means an
-    # international number copied off a business card is not read as a
-    # national one with two stray zeroes.
-    international = raw.lstrip().startswith("+") or digits.startswith("00")
-    if digits.startswith("00"):
-        digits = digits[2:]
-
-    code = re.sub(r"\D", "", default_country_code or "")
-    if not international and code:
-        # Already carrying the code is the common case when somebody pastes a
-        # mixed list. Treated as already-prefixed only when the number is long
-        # enough to be a full international one *and* what follows the code is
-        # long enough to be a national number in its own right -- otherwise
-        # "919191919", a nine-digit national number that happens to start with
-        # 91, would silently lose its first two digits.
-        already_prefixed = (
-            digits.startswith(code)
-            and len(digits) >= _MIN_INTERNATIONAL_DIGITS
-            and len(digits) - len(code) >= _MIN_NATIONAL_DIGITS
-        )
-        if not already_prefixed:
-            digits = code + digits
-
-    if not international and not code:
+    if digits is None:
         return "", NO_COUNTRY_CODE
 
     try:
