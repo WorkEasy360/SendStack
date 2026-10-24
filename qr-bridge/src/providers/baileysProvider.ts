@@ -344,14 +344,27 @@ export class BaileysProvider implements WhatsAppBridgeProvider {
             syncFullHistory: false,
         });
         current.sock = sock;
+        // A resumed session arrives already linked; a fresh one becomes linked
+        // when the scan lands (the creds.update below).
+        if (state.creds.me) current.paired = true;
 
         // A socket we have replaced still emits its own close, and acting on
         // that is what used to start yet another one. Every handler below
         // stands down once this generation is no longer the session's current.
         const isCurrent = () => this.store.get(sessionId)?.generation === generation;
 
-        sock.ev.on("creds.update", () => {
-            if (isCurrent()) void saveCreds();
+        sock.ev.on("creds.update", (update) => {
+            if (!isCurrent()) return;
+            // `me` is written by WhatsApp's pair-success. The session turns
+            // from a QR attempt into a connected number at this moment, which
+            // is up to a few seconds before the socket reopens and reports
+            // CONNECTED -- a window the QR deadline must not be allowed to
+            // fire inside.
+            if (update?.me) {
+                const live = this.store.get(sessionId);
+                if (live) live.paired = true;
+            }
+            void saveCreds();
         });
 
         sock.ev.on("connection.update", async (update) => {
@@ -465,7 +478,22 @@ export class BaileysProvider implements WhatsAppBridgeProvider {
         const attempt = (entry.reconnectAttempts ?? 0) + 1;
         entry.reconnectAttempts = attempt;
 
-        if (attempt > MAX_RECONNECT_ATTEMPTS) {
+        if (attempt > MAX_RECONNECT_ATTEMPTS && entry.paired) {
+            // A linked number is not a pairing attempt, and a long outage
+            // (the host's network down for ten minutes, WhatsApp unreachable)
+            // is not a reason to unlink it. Its credentials are still good,
+            // so keep knocking at the slow, capped interval until WhatsApp
+            // answers; giving up here used to turn every extended blip into a
+            // dead device that someone had to re-scan. Logged once, not per
+            // attempt, so a day-long outage is one line rather than a
+            // thousand.
+            if (attempt === MAX_RECONNECT_ATTEMPTS + 1) {
+                logger.error(
+                    { sessionId, attempt },
+                    "WhatsApp is not answering this linked session; will keep retrying every minute until it does",
+                );
+            }
+        } else if (attempt > MAX_RECONNECT_ATTEMPTS) {
             logger.error({ sessionId, attempt }, "Giving up reconnecting this WhatsApp session");
             entry.snapshot = {
                 ...entry.snapshot,
@@ -543,6 +571,18 @@ export class BaileysProvider implements WhatsAppBridgeProvider {
     private async expireSession(sessionId: string): Promise<void> {
         const entry = this.store.get(sessionId);
         if (!entry || entry.snapshot.status !== "QR_READY") return;
+
+        // The scan was accepted but the socket has not reopened yet, so the
+        // snapshot still says QR_READY. Expiring now would delete the auth
+        // folder of a number that is linked on the user's phone: the handset
+        // would keep listing the device while this service had nothing to
+        // reconnect it with, and nobody could tell it from a connection that
+        // "expired". The reopen reports CONNECTED within seconds; let it.
+        if (entry.paired) {
+            logger.info({ sessionId }, "QR window elapsed after the scan was accepted; keeping the session");
+            entry.expiryTimer = undefined;
+            return;
+        }
 
         entry.closing = true;
         entry.snapshot = { ...entry.snapshot, status: "EXPIRED", qr: null };

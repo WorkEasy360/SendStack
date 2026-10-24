@@ -552,6 +552,149 @@ class ConnectionManagerQRTests(TestCase):
         self.assertEqual(self.account.phone_number, "+15559990000")
         self.assertEqual(self.account.provider_account_id, "device-1")
 
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_expiry_of_a_superseded_session_leaves_a_connected_account_alone(self, mock_start):
+        # The bug that made freshly connected numbers read "Expired" about
+        # ninety seconds after pairing. A double-fired /connect/ left two
+        # provider sessions for one account; only one was scanned, and the
+        # unscanned twin's EXPIRED webhook was written onto the account row.
+        expires_at = timezone.now() + timedelta(seconds=120)
+        mock_start.return_value = ConnectionSessionResult(
+            status="QR_READY", session_id="sess-scanned", qr_data="data:x", qr_expires_at=expires_at,
+        )
+        ConnectionManager.start_connection(self.account)
+        WhatsAppConnectionSession.objects.create(
+            whatsapp_account=self.account, provider=self.account.provider,
+            session_id="sess-twin", status=WhatsAppConnectionSession.Status.QR_READY, qr_expires_at=expires_at,
+        )
+        ConnectionManager.handle_connection_webhook(
+            WhatsAppAccount.Provider.QR_PROVIDER,
+            ConnectionWebhookEvent(session_id="sess-scanned", status="CONNECTED", phone_number="+15559990000"),
+        )
+
+        twin = ConnectionManager.handle_connection_webhook(
+            WhatsAppAccount.Provider.QR_PROVIDER,
+            ConnectionWebhookEvent(session_id="sess-twin", status="EXPIRED"),
+        )
+
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.status, WhatsAppAccount.Status.CONNECTED)
+        self.assertEqual(self.account.provider_session_id, "sess-scanned")
+        # The twin's own row still closes -- only the account is protected.
+        twin.refresh_from_db()
+        self.assertEqual(twin.status, WhatsAppConnectionSession.Status.EXPIRED)
+
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_error_and_disconnect_of_a_superseded_session_are_ignored_too(self, mock_start):
+        expires_at = timezone.now() + timedelta(seconds=120)
+        mock_start.return_value = ConnectionSessionResult(
+            status="QR_READY", session_id="sess-live", qr_data="data:x", qr_expires_at=expires_at,
+        )
+        ConnectionManager.start_connection(self.account)
+        ConnectionManager.handle_connection_webhook(
+            WhatsAppAccount.Provider.QR_PROVIDER,
+            ConnectionWebhookEvent(session_id="sess-live", status="CONNECTED", phone_number="+15559990000"),
+        )
+        WhatsAppConnectionSession.objects.create(
+            whatsapp_account=self.account, provider=self.account.provider,
+            session_id="sess-old", status=WhatsAppConnectionSession.Status.CONNECTED,
+        )
+
+        for status in ("ERROR", "DISCONNECTED"):
+            ConnectionManager.handle_connection_webhook(
+                WhatsAppAccount.Provider.QR_PROVIDER,
+                ConnectionWebhookEvent(session_id="sess-old", status=status, error="replaced"),
+            )
+            self.account.refresh_from_db()
+            self.assertEqual(self.account.status, WhatsAppAccount.Status.CONNECTED, status)
+
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_expiry_of_the_current_session_still_expires_the_account(self, mock_start):
+        # The guard must not turn off the real thing: a QR nobody scanned has
+        # to read as expired, or the card sits on "Waiting for scan" forever.
+        expires_at = timezone.now() + timedelta(seconds=120)
+        mock_start.return_value = ConnectionSessionResult(
+            status="QR_READY", session_id="sess-only", qr_data="data:x", qr_expires_at=expires_at,
+        )
+        ConnectionManager.start_connection(self.account)
+
+        ConnectionManager.handle_connection_webhook(
+            WhatsAppAccount.Provider.QR_PROVIDER,
+            ConnectionWebhookEvent(session_id="sess-only", status="EXPIRED"),
+        )
+
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.status, WhatsAppAccount.Status.EXPIRED)
+
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_connecting_twice_while_a_qr_is_waiting_reuses_it(self, mock_start):
+        # The second of two simultaneous /connect/ calls: it must be handed the
+        # first call's QR, not be given a provider session of its own.
+        expires_at = timezone.now() + timedelta(seconds=120)
+        mock_start.return_value = ConnectionSessionResult(
+            status="QR_READY", session_id="sess-1", qr_data="data:x", qr_expires_at=expires_at,
+        )
+        first = ConnectionManager.start_connection(self.account)
+
+        second = ConnectionManager.start_connection(self.account)
+
+        self.assertEqual(mock_start.call_count, 1)
+        self.assertTrue(second["success"])
+        self.assertEqual(second["status"], WhatsAppAccount.Status.QR_READY)
+        self.assertEqual(second["session_id"], first["session_id"])
+        self.assertEqual(second["expires_at"], first["expires_at"])
+        self.assertEqual(WhatsAppConnectionSession.objects.filter(whatsapp_account=self.account).count(), 1)
+
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.disconnect")
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_connecting_after_a_qr_lapsed_starts_a_fresh_one(self, mock_start, mock_disconnect):
+        # Reuse is for a QR that can still be scanned. A lapsed one is replaced
+        # (and its provider session released), or Reconnect would hand back a
+        # code that no longer works.
+        mock_start.side_effect = [
+            ConnectionSessionResult(
+                status="QR_READY", session_id="sess-lapsed", qr_data="data:x",
+                qr_expires_at=timezone.now() - timedelta(seconds=1),
+            ),
+            ConnectionSessionResult(
+                status="QR_READY", session_id="sess-fresh", qr_data="data:y",
+                qr_expires_at=timezone.now() + timedelta(seconds=120),
+            ),
+        ]
+        ConnectionManager.start_connection(self.account)
+
+        result = ConnectionManager.start_connection(self.account)
+
+        self.assertEqual(result["session_id"], "sess-fresh")
+        self.assertEqual(mock_start.call_count, 2)
+        mock_disconnect.assert_called_once_with(self.account, "sess-lapsed")
+
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.disconnect")
+    @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
+    def test_reconnecting_releases_a_session_the_provider_still_holds(self, mock_start, mock_disconnect):
+        # The mismatch behind three live links on one phone: the account read
+        # EXPIRED while its provider session was still connected, the user
+        # pressed Reconnect, and the surviving socket was never released.
+        expires_at = timezone.now() + timedelta(seconds=120)
+        mock_start.side_effect = [
+            ConnectionSessionResult(status="QR_READY", session_id="sess-held", qr_expires_at=expires_at),
+            ConnectionSessionResult(status="QR_READY", session_id="sess-new", qr_expires_at=expires_at),
+        ]
+        ConnectionManager.start_connection(self.account)
+        ConnectionManager.handle_connection_webhook(
+            WhatsAppAccount.Provider.QR_PROVIDER,
+            ConnectionWebhookEvent(session_id="sess-held", status="CONNECTED", phone_number="+15559990000"),
+        )
+        WhatsAppAccount.objects.filter(pk=self.account.pk).update(status=WhatsAppAccount.Status.EXPIRED)
+        self.account.refresh_from_db()
+
+        result = ConnectionManager.start_connection(self.account)
+
+        self.assertEqual(result["session_id"], "sess-new")
+        mock_disconnect.assert_called_once_with(self.account, "sess-held")
+        held = WhatsAppConnectionSession.objects.get(session_id="sess-held")
+        self.assertEqual(held.status, WhatsAppConnectionSession.Status.DISCONNECTED)
+
     @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.disconnect")
     @patch("apps.whatsapp.providers.qr_bridge.NotConfiguredProvider.start_connection")
     def test_disconnect(self, mock_start, mock_disconnect):

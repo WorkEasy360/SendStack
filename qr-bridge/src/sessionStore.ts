@@ -30,6 +30,13 @@ export interface SessionEntry {
     // treated as "reconnect", silently reviving a session we just expired
     // and looping forever against WhatsApp's real servers.
     closing?: boolean;
+    // True once WhatsApp has accepted the scan, i.e. this auth folder holds a
+    // linked device (`creds.me` exists). From that point the session is the
+    // user's connected number, not a pairing attempt: the QR window no longer
+    // applies to it and reconnecting must never be given up on. Set on resume
+    // from the stored creds and live from the first creds.update that carries
+    // `me`.
+    paired?: boolean;
     // Bumped every time this session opens a socket. Each socket's handlers
     // capture the value they were registered under and go quiet once it moves
     // on, so a socket we have already replaced can never act on its own close.

@@ -119,6 +119,7 @@ export default function WhatsAppConnectionWizard({ onClose, onConnected, existin
 
     const pollRef = useRef(null);
     const countdownRef = useRef(null);
+    const connectRequestedRef = useRef(false);
 
     useEffect(() => {
         return () => {
@@ -159,7 +160,16 @@ export default function WhatsAppConnectionWizard({ onClose, onConnected, existin
             // No stored credentials to reconnect with (shouldn't normally
             // happen) -- fall back to the full credential form.
             setStep("api");
-        } else {
+        } else if (!connectRequestedRef.current) {
+            // React StrictMode runs this effect twice in development, and a
+            // second /connect/ in the same instant used to create a second
+            // QR session beside the first. Only one of the pair can be
+            // scanned; the other expired two minutes later and took the
+            // freshly connected account down with it. Guarding the request
+            // rather than the whole effect matters: the simulated unmount
+            // clears the poll interval, so the QR_READY branch above has to
+            // be free to run again and restart it.
+            connectRequestedRef.current = true;
             startConnection(existingAccount, method);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -17,6 +17,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.utils import timezone
 
 from ..models import WhatsAppConnectionSession
@@ -56,7 +57,62 @@ class ConnectionManager:
 
     @classmethod
     def start_connection(cls, account) -> dict:
-        """Begin a new connection attempt (QR pairing or Cloud API credential check)."""
+        """
+        Begin a new connection attempt (QR pairing or Cloud API credential check).
+
+        Serialised per account, and idempotent while a pairing is already
+        waiting to be scanned. Both halves exist because the wizard can fire
+        this twice in the same instant (React StrictMode re-runs its reconnect
+        effect; a double-click does the same), and an unguarded second call
+        used to build a second bridge session beside the first. Only one of
+        the pair is ever scanned. The other times out two minutes later, and
+        that timeout used to be written onto the shared account row -- so a
+        number that had connected fine flipped to EXPIRED about ninety seconds
+        after the user finished pairing it. The row lock makes the second call
+        wait for the first; the live-session check then hands it the first
+        call's QR instead of creating another.
+        """
+        with transaction.atomic():
+            # Take the lock before reading anything: the in-memory `account`
+            # was loaded before we waited, and may predate the other call's
+            # writes.
+            type(account).objects.select_for_update().only("pk").get(pk=account.pk)
+            account.refresh_from_db()
+
+            live = cls._live_pairing_session(account)
+            if live is not None:
+                logger.info(
+                    "Reusing the live pairing session_id=%s for account_id=%s instead of starting another",
+                    live.session_id, account.pk,
+                )
+                return {
+                    "success": True,
+                    "status": account.status,
+                    "message": "Scan the QR code with WhatsApp.",
+                    "session_id": live.session_id,
+                    "expires_at": live.qr_expires_at,
+                }
+
+            # Anything the provider still holds for this account is about to be
+            # replaced. A new pairing beside a surviving one is two sockets on
+            # one number, which is how Signal sessions get corrupted -- see
+            # refresh_qr, which has always done this for the explicit case.
+            previous = cls._latest_session(account)
+            if (
+                previous is not None
+                and previous.session_id
+                and previous.status in (
+                    WhatsAppConnectionSession.Status.CONNECTING,
+                    WhatsAppConnectionSession.Status.QR_READY,
+                    WhatsAppConnectionSession.Status.CONNECTED,
+                )
+            ):
+                cls._retire_session(account, previous)
+
+            return cls._start_new_connection(account)
+
+    @classmethod
+    def _start_new_connection(cls, account) -> dict:
         provider = get_provider(account)
 
         account.status = account.Status.CONNECTING
@@ -84,6 +140,42 @@ class ConnectionManager:
         return cls._apply_session_result(account, session, result)
 
     @classmethod
+    def _live_pairing_session(cls, account) -> WhatsAppConnectionSession | None:
+        """The account's QR that is still waiting to be scanned, if there is one."""
+        session = cls._latest_session(account)
+        if (
+            session is not None
+            and session.session_id
+            and session.status == WhatsAppConnectionSession.Status.QR_READY
+            and account.status == account.Status.QR_READY
+            and not cls._is_stale(session)
+        ):
+            return session
+        return None
+
+    @classmethod
+    def _retire_session(cls, account, session) -> None:
+        """Tear a superseded session down at the provider and close its row."""
+        if session.session_id:
+            try:
+                get_provider(account).disconnect(account, session.session_id)
+            except ProviderError as exc:
+                logger.warning(
+                    "Failed to disconnect provider session_id=%s for account_id=%s while replacing it: %s",
+                    session.session_id, account.pk, exc.message,
+                )
+        session.status = (
+            WhatsAppConnectionSession.Status.EXPIRED
+            if session.status in (
+                WhatsAppConnectionSession.Status.CONNECTING,
+                WhatsAppConnectionSession.Status.QR_READY,
+            )
+            else WhatsAppConnectionSession.Status.DISCONNECTED
+        )
+        session.save(update_fields=["status", "updated_at"])
+        cache.delete(_qr_cache_key(session.pk))
+
+    @classmethod
     def refresh_qr(cls, account) -> dict:
         old_session = cls._latest_session(account)
         if old_session and old_session.status not in (
@@ -96,25 +188,7 @@ class ConnectionManager:
             # provider socket is stale/corrupted: starting a fresh QR session
             # while the old one is still alive gives Baileys two owners of the
             # same WhatsApp device and can corrupt Signal ratchets (Bad MAC).
-            if old_session.session_id:
-                provider = get_provider(account)
-                try:
-                    provider.disconnect(account, old_session.session_id)
-                except ProviderError as exc:
-                    logger.warning(
-                        "Failed to disconnect provider session_id=%s for account_id=%s before refresh: %s",
-                        old_session.session_id, account.pk, exc.message,
-                    )
-            old_session.status = (
-                WhatsAppConnectionSession.Status.EXPIRED
-                if old_session.status in (
-                    WhatsAppConnectionSession.Status.CONNECTING,
-                    WhatsAppConnectionSession.Status.QR_READY,
-                )
-                else WhatsAppConnectionSession.Status.DISCONNECTED
-            )
-            old_session.save(update_fields=["status", "updated_at"])
-            cache.delete(_qr_cache_key(old_session.pk))
+            cls._retire_session(account, old_session)
         return cls.start_connection(account)
 
     @classmethod
@@ -403,15 +477,36 @@ class ConnectionManager:
                 ),
             )
         elif event.status in ("ERROR", "EXPIRED", "DISCONNECTED"):
-            account.status = event.status
-            account.error_message = event.error or ""
-            account.save(update_fields=["status", "error_message", "updated_at"])
+            # The account row speaks for the session it is currently using and
+            # no other. A pairing that was superseded -- the unscanned twin of a
+            # double start, or a QR the user abandoned before scanning a newer
+            # one -- still times out and reports EXPIRED, and that must close
+            # its own row without touching an account that has since connected
+            # on a different session. Letting it through is what made freshly
+            # connected numbers flip to EXPIRED a couple of minutes later.
+            if cls._owns_account(account, session):
+                account.status = event.status
+                account.error_message = event.error or ""
+                account.save(update_fields=["status", "error_message", "updated_at"])
+            else:
+                logger.info(
+                    "Ignoring %s for superseded session_id=%s: account_id=%s now uses session_id=%s",
+                    event.status, session.session_id, account.pk, account.provider_session_id,
+                )
             session.status = event.status
             session.error_message = event.error or ""
             session.save(update_fields=["status", "error_message", "updated_at"])
             cache.delete(_qr_cache_key(session.pk))
 
         return session
+
+    @staticmethod
+    def _owns_account(account, session) -> bool:
+        """Whether ``session`` is the one this account is currently built on."""
+        # A blank pointer is an account that has not committed to a session yet
+        # (or predates the column being kept up to date); nothing contradicts
+        # the session, so it is treated as the owner as it always was.
+        return not account.provider_session_id or account.provider_session_id == session.session_id
 
     @staticmethod
     def _require_connected(account) -> SendResult | None:
