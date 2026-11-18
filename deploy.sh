@@ -68,6 +68,12 @@ fi
 command -v docker >/dev/null || die "docker not installed"
 $COMPOSE version >/dev/null 2>&1 || die "docker compose v2 not available"
 
+# The backend image installs the private WorkEasy360 sign-in connector, which
+# the build reads with a short-lived token passed as a BuildKit secret
+# (docker-compose.yml, "secrets"). Checked here, before the backup, rather than
+# failing half-way through the build. Never written to disk or printed.
+[ -n "${WORKEASY360_SSO_TOKEN:-}" ] || die "WORKEASY360_SSO_TOKEN is not set. The backend build needs a short-lived token that can read WorkEasy360/workeasy360-sso, in this shell only: read -rs WORKEASY360_SSO_TOKEN && export WORKEASY360_SSO_TOKEN && ./deploy.sh; unset WORKEASY360_SSO_TOKEN. See docs/workeasy360-sso.md, 'Installing the connector'."
+
 # Rollback target. Captured before anything changes, because finding it out
 # afterwards, under pressure, is the thing the runbook exists to prevent.
 PREVIOUS_COMMIT="$(git rev-parse HEAD)"

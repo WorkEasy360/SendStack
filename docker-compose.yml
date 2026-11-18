@@ -122,10 +122,13 @@ services:
         APP_BUILD: ${APP_BUILD:-}
         APP_VERSION: ${APP_VERSION:-1.0.0}
       # The WorkEasy360 sign-in connector is installed from its private
-      # repository with a read-only deploy key held by your ssh-agent
-      # (docs/workeasy360-sso.md). Needs BuildKit.
-      ssh:
-        - default
+      # repository with a short-lived token that can read it, passed as a
+      # BuildKit secret (never a build argument) to the one Dockerfile step
+      # that installs it. Export WORKEASY360_SSO_TOKEN before building, e.g.
+      #   WORKEASY360_SSO_TOKEN="$(gh auth token)" docker compose build backend
+      # docs/workeasy360-sso.md, "Installing the connector". Needs BuildKit.
+      secrets:
+        - workeasy360_sso_token
     restart: unless-stopped
     env_file: .env
     environment:
@@ -287,3 +290,10 @@ volumes:
   static_volume:
   media_volume:
   qr_bridge_data:
+
+# Build-time only: the backend build's read access to the private sign-in
+# connector, from the environment of whoever runs `docker compose build`.
+# No service mounts it at runtime.
+secrets:
+  workeasy360_sso_token:
+    environment: WORKEASY360_SSO_TOKEN

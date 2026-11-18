@@ -110,10 +110,71 @@ pip check
 
 0.3.2 declares `Django>=4.2,<6.2`, `PyJWT[crypto]>=2.8,<3` and `httpx>=0.25,<1`, so pip resolves it against SendStack's Django 6.1 with its dependencies, like any other package: no `--no-deps`, and `pip check` is clean. (0.3.1 declared `Django<6.1` and had to be installed with `--no-deps`.) `requirements/base.txt` still pins `PyJWT[crypto]`, because SendStack's own test provider (`apps/workeasy360/fake_provider.py`) imports it; `httpx` comes with the connector.
 
-**Access.**
+**Access.** Reading the connector takes a person's own access or a **short-lived token**: never a deploy key, never a long-lived token stored anywhere.
 
-- **Docker:** `backend/Dockerfile` installs it in a BuildKit step that forwards a read-only **deploy key** from your ssh-agent (`--mount=type=ssh`). The key is never stored in a layer, and GitHub's host key is pinned. `docker-compose.yml` forwards the agent (`build.ssh: [default]`). The legacy builder (`DOCKER_BUILDKIT=0`, the README's OneDrive workaround) cannot do this: build from outside OneDrive instead.
-- **Development:** your own GitHub SSH access works. With https and the `gh` credential helper, rewrite the URL: `git config --global url."https://github.com/".insteadOf ssh://git@github.com/`.
+- **Development:** your own GitHub SSH key installs it as written. With the GitHub CLI instead of an SSH key, rewrite that one URL to https with your CLI's token for the one command, through git's environment configuration (no file, no global config, no credential helper stores it):
+
+  ```bash
+  WORKEASY360_SSO_TOKEN="$(gh auth token)"
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+  GIT_CONFIG_KEY_1="url.https://x-access-token:${WORKEASY360_SSO_TOKEN}@github.com/WorkEasy360/workeasy360-sso.git.insteadOf" \
+  GIT_CONFIG_VALUE_1=ssh://git@github.com/WorkEasy360/workeasy360-sso.git \
+    pip install -r requirements/workeasy360.txt
+  unset WORKEASY360_SSO_TOKEN
+  ```
+
+- **The image.** `backend/Dockerfile` is two stages. The builder installs everything into `/opt/venv`; the one `RUN` that installs the connector is the only step with read access, one of two ways:
+  - **A token**, as the BuildKit secret `workeasy360_sso_token` (what a release build and CI use):
+
+    ```bash
+    # bash, from the repository root
+    WORKEASY360_SSO_TOKEN="$(gh auth token)" \
+      docker build --secret id=workeasy360_sso_token,env=WORKEASY360_SSO_TOKEN -t sendstack-backend backend/
+    # docker compose (docker-compose.yml declares the secret for backend, celery-worker and celery-beat)
+    WORKEASY360_SSO_TOKEN="$(gh auth token)" docker compose build backend celery-worker celery-beat
+    ```
+
+    ```powershell
+    # PowerShell
+    $env:WORKEASY360_SSO_TOKEN = gh auth token
+    docker build --secret id=workeasy360_sso_token,env=WORKEASY360_SSO_TOKEN -t sendstack-backend backend/
+    Remove-Item Env:WORKEASY360_SSO_TOKEN
+    ```
+
+    Inside that `RUN`, git's environment configuration (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`) rewrites the connector's SSH URL, and no other, to `https://x-access-token:<token>@github.com/WorkEasy360/workeasy360-sso.git` and empties `credential.helper`, so git stores the token nowhere. **Never pass it as a `--build-arg`**: build arguments are recorded in the image.
+  - **Your own SSH key**, through your agent: `docker build --ssh default -t sendstack-backend backend/`. Only github.com's published host key is trusted (`StrictHostKeyChecking=yes`).
+
+  BuildKit mounts the secret (a tmpfs file) and the agent's socket into that one `RUN` and nowhere else, and `PIP_NO_CACHE_DIR` keeps pip from caching what it builds. No token, token-bearing URL, key, `.git`, `.ssh` or connector checkout reaches any layer, and git and the SSH client exist only in the builder stage: the runtime stage copies `/opt/venv` and nothing else from it (checked on 2026-11-18 by building with a token and scanning every layer of the image and of its builder stage). With neither a token nor an agent, the build stops at that step, saying what to pass. The legacy builder (`DOCKER_BUILDKIT=0`, the README's OneDrive workaround) cannot pass a secret: build from outside OneDrive instead.
+
+  The image does contain the connector's code (`/opt/venv/lib/python3.13/site-packages/workeasy360_sso`), as it must to run: push it only to a **private** registry, never Docker Hub, a public GHCR package or any public registry.
+
+- **`deploy.sh`** builds the backend images on the server with `docker compose build`, so it needs `WORKEASY360_SSO_TOKEN` in its environment and stops at once, before the backup, when it is missing. Give it a token for that run only, typed rather than kept in the shell history or a file: `read -rs WORKEASY360_SSO_TOKEN && export WORKEASY360_SSO_TOKEN && ./deploy.sh; unset WORKEASY360_SSO_TOKEN`. Prefer a GitHub App installation token (below), which expires within the hour, to a person's own `gh auth token`.
+
+- **CI.** SendStack has no CI today. When it gets one, each job that installs the backend's requirements or builds the image mints its own token from the shared WorkEasy360 GitHub App (Contents: read-only, installed on `workeasy360-sso` only; the repository variable `WORKEASY360_SSO_APP_ID` and the Actions secret `WORKEASY360_SSO_APP_PRIVATE_KEY`, the names EasyBook and Easy CRM use), uses it for that one step, and revokes it:
+
+  ```yaml
+  - id: w360sso
+    uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+    with:
+      app-id: ${{ vars.WORKEASY360_SSO_APP_ID }}
+      private-key: ${{ secrets.WORKEASY360_SSO_APP_PRIVATE_KEY }}
+      owner: WorkEasy360
+      repositories: workeasy360-sso
+      permission-contents: read
+      skip-token-revoke: 'true'   # revoked by the step below, right after its one use
+  - name: Build the backend image
+    env:
+      WORKEASY360_SSO_TOKEN: ${{ steps.w360sso.outputs.token }}
+    run: docker build --secret id=workeasy360_sso_token,env=WORKEASY360_SSO_TOKEN -t sendstack-backend backend/
+  - name: Revoke the connector token
+    if: always() && steps.w360sso.outputs.token != ''
+    env:
+      GH_TOKEN: ${{ steps.w360sso.outputs.token }}
+    run: gh api --method DELETE /installation/token --silent || echo "::warning::It expires by itself within the hour."
+  ```
+
+  The token can only read `workeasy360-sso`, lasts an hour at most and is masked in every log. A job that runs the test suite without Docker uses the same environment-only rewrite as **Development** above, on its one `pip install` command. Creating the App, storing its two values with `gh variable set` / `gh secret set` and deleting the key file, rotating the key and revoking old deploy keys: EasyBook's `docs/workeasy360-sso.md`, "Installing the connector" (one App serves every product: run its two `gh` commands with `-R WorkEasy360/SendStack`).
 
 Without access, the backend does not install: the connector is a hard dependency once this change is merged.
 
@@ -266,7 +327,7 @@ Run them in the backend container (or `python manage.py ...` in `backend/`).
    ```
 
    With the containerised backend, `127.0.0.1` is the container itself. Use `http://host.docker.internal:8031` only if the platform answers under that issuer name; the issuer must match exactly.
-5. Start SendStack: `docker compose up -d --build` (backend behind nginx on :80), then `npm run dev` in `frontend/`. Vite on :5173 proxies `/api` to nginx.
+5. Start SendStack: `WORKEASY360_SSO_TOKEN="$(gh auth token)" docker compose up -d --build` (backend behind nginx on :80; the token is the build's read access to the connector, [Installing the connector](#installing-the-connector)), then `npm run dev` in `frontend/`. Vite on :5173 proxies `/api` to nginx.
 6. Open `http://localhost:5173/login` and choose **Continue with WorkEasy360**. Or open `http://localhost:5173/api/v1/auth/workeasy360/start/?organization=<organization uuid>`, as the launcher would.
 7. `python manage.py w360sso_check` proves the credential against the platform.
 
@@ -321,7 +382,7 @@ python manage.py test apps.workeasy360
 ## Not covered yet, and before go-live
 
 - **No catalog product, integration or key yet**, and `sendstack.workeasy360.com` has no DNS record or TXT proof.
-- **Private dependency in a public repository.** Building needs the deploy key, and SendStack has no CI to run these tests.
+- **Private dependency in a public repository.** Building needs a short-lived token that can read the connector (or your own SSH key), and SendStack has no CI to run these tests or mint that token yet ([Installing the connector](#installing-the-connector), "CI").
 - **Commercial overlap is not reconciled.** SendStack's own plans, trial, credits, reseller tiers and billing still apply inside a workspace. The WorkEasy360 entitlement is the gate on top of them. Mapping a WorkEasy360 subscription to a SendStack plan (and reporting WhatsApp/SMS usage to the platform meters) is a product decision not made here. A workspace created by WorkEasy360 sign-in starts on the trial plan if trials are on.
 - **SendStack's own Terms acceptance** is not recorded for workspaces created by WorkEasy360 sign-in.
 - **Not built:** automatic start for SSO-only direct visits (integration guide §6b), and "confirm it's you" (`prompt=login`).
