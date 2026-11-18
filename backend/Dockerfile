@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements/production.txt
 #
 # GitHub's host key is pinned from https://api.github.com/meta rather than
 # trusted on first use.
-RUN --mount=type=ssh     mkdir -p -m 0700 /root/.ssh     && echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > /root/.ssh/known_hosts     && pip install --no-cache-dir --no-deps -r requirements/workeasy360.txt     && rm -rf /root/.ssh
+RUN --mount=type=ssh     mkdir -p -m 0700 /root/.ssh     && echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > /root/.ssh/known_hosts     && pip install --no-cache-dir -r requirements/workeasy360.txt     && rm -rf /root/.ssh
 
 COPY . .
 

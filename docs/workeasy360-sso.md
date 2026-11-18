@@ -100,19 +100,15 @@ Then:
 
 ## Installing the connector
 
-`backend/requirements/workeasy360.txt` pins `workeasy360-sso` to commit `a98552f8f37e1e4f1fab1de99cc5b915cb9ed5c1` (v0.3.1) of the **private** repository `WorkEasy360/workeasy360-sso`. This repository is public, so nothing of the connector is vendored here.
+`backend/requirements/workeasy360.txt` pins `workeasy360-sso` to commit `7baeb8fc6259c0c1dc61be3f3c4b35004f80b645` (tag `v0.3.2`) of the **private** repository `WorkEasy360/workeasy360-sso`. The pin is the full commit SHA, never the tag: a tag can be moved, a commit cannot. This repository is public, so nothing of the connector is vendored here.
 
 ```bash
 pip install -r requirements/production.txt
-pip install --no-deps -r requirements/workeasy360.txt     # needs read access to the private repository
+pip install -r requirements/workeasy360.txt     # needs read access to the private repository
+pip check
 ```
 
-**Why `--no-deps`.** The connector's 0.3.1 metadata declares `Django>=4.2,<6.1`, and SendStack runs Django 6.1. The connector's whole suite (183 tests) passes on Django 6.1 and 6.1.3, with deprecation warnings as errors and its migrations complete. So it is compatible, but pip refuses the combination on metadata alone. Its dependencies are pinned in `requirements/base.txt` instead:
-
-- `PyJWT[crypto]==2.15.1`;
-- `httpx==0.28.1`.
-
-Drop `--no-deps` once a connector release declares 6.1.
+0.3.2 declares `Django>=4.2,<6.2`, `PyJWT[crypto]>=2.8,<3` and `httpx>=0.25,<1`, so pip resolves it against SendStack's Django 6.1 with its dependencies, like any other package: no `--no-deps`, and `pip check` is clean. (0.3.1 declared `Django<6.1` and had to be installed with `--no-deps`.) `requirements/base.txt` still pins `PyJWT[crypto]`, because SendStack's own test provider (`apps/workeasy360/fake_provider.py`) imports it; `httpx` comes with the connector.
 
 **Access.**
 
@@ -325,7 +321,6 @@ python manage.py test apps.workeasy360
 ## Not covered yet, and before go-live
 
 - **No catalog product, integration or key yet**, and `sendstack.workeasy360.com` has no DNS record or TXT proof.
-- **The connector's metadata says Django<6.1.** SendStack installs it with `--no-deps`. The connector's CI should add Django 6.1 and widen the pin.
 - **Private dependency in a public repository.** Building needs the deploy key, and SendStack has no CI to run these tests.
 - **Commercial overlap is not reconciled.** SendStack's own plans, trial, credits, reseller tiers and billing still apply inside a workspace. The WorkEasy360 entitlement is the gate on top of them. Mapping a WorkEasy360 subscription to a SendStack plan (and reporting WhatsApp/SMS usage to the platform meters) is a product decision not made here. A workspace created by WorkEasy360 sign-in starts on the trial plan if trials are on.
 - **SendStack's own Terms acceptance** is not recorded for workspaces created by WorkEasy360 sign-in.
