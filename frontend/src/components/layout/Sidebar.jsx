@@ -37,7 +37,7 @@ function NavItem({ item, collapsed, onNavigate }) {
     );
 }
 
-export default function Sidebar({ user, collapsed, onToggleCollapse, onLogout, onNavigate, onCloseMobile, isMobile }) {
+export default function Sidebar({ user, collapsed, onToggleCollapse, onLogout, onLogoutEverywhere, onNavigate, onCloseMobile, isMobile }) {
     const groups = visibleGroups(user?.role);
 
     return (
@@ -121,6 +121,15 @@ export default function Sidebar({ user, collapsed, onToggleCollapse, onLogout, o
                         <div className="min-w-0 flex-1">
                             <p className="text-sm font-semibold text-ink-900 truncate m-0">{user?.username}</p>
                             <p className="text-xs text-ink-500 truncate m-0">{user?.tenant_name || user?.role}</p>
+                            {onLogoutEverywhere && (
+                                <button
+                                    type="button"
+                                    onClick={onLogoutEverywhere}
+                                    className="text-xs text-ink-500 hover:text-red-600 underline underline-offset-2 cursor-pointer bg-transparent border-none p-0 m-0"
+                                >
+                                    Sign out of WorkEasy360 too
+                                </button>
+                            )}
                         </div>
                         <button
                             type="button"

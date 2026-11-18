@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
-import { UserCheck } from "lucide-react";
+import { ShieldAlert, UserCheck } from "lucide-react";
 import Sidebar from "../components/layout/Sidebar";
 import Topbar from "../components/layout/Topbar";
 import { useAuth } from "../context/AuthContext";
@@ -15,7 +15,11 @@ const COLLAPSE_KEY = "sidebar_collapsed";
  * than overlapping it.
  */
 export default function AppLayout() {
-    const { user, logout, impersonation, exitImpersonation } = useAuth();
+    const { user, logout, logoutEverywhere, impersonation, exitImpersonation } = useAuth();
+    // WorkEasy360 says this organization (or person) may no longer use
+    // SendStack: the session stays so the person can read why and sign out.
+    const access = user?.workeasy360?.access;
+    const accessEnded = access && !access.allowed;
     const { pathname } = useLocation();
 
     // Dark mode belongs to the signed-in app: the class goes on <html> while
@@ -52,6 +56,7 @@ export default function AppLayout() {
     const sidebarProps = {
         user,
         onLogout: logout,
+        onLogoutEverywhere: user?.workeasy360?.session ? logoutEverywhere : undefined,
         onToggleCollapse: () => setCollapsed((value) => !value),
     };
 
@@ -69,6 +74,25 @@ export default function AppLayout() {
                         className="underline underline-offset-2 font-semibold cursor-pointer bg-transparent border-none text-white p-0"
                     >
                         Exit and return to my account
+                    </button>
+                </div>
+            )}
+
+            {accessEnded && (
+                <div
+                    role="alert"
+                    className="shrink-0 bg-red-600 text-white text-sm font-medium flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2 text-center"
+                >
+                    <span className="inline-flex items-center gap-1.5">
+                        <ShieldAlert size={15} aria-hidden="true" />
+                        {access.message || "Your organization's access to SendStack has ended."}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={logout}
+                        className="underline underline-offset-2 font-semibold cursor-pointer bg-transparent border-none text-white p-0"
+                    >
+                        Sign out
                     </button>
                 </div>
             )}
