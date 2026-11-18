@@ -121,6 +121,11 @@ services:
         #   export APP_BUILD=$(git rev-parse --short HEAD)
         APP_BUILD: ${APP_BUILD:-}
         APP_VERSION: ${APP_VERSION:-1.0.0}
+      # The WorkEasy360 sign-in connector is installed from its private
+      # repository with a read-only deploy key held by your ssh-agent
+      # (docs/workeasy360-sso.md). Needs BuildKit.
+      ssh:
+        - default
     restart: unless-stopped
     env_file: .env
     environment:

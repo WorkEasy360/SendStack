@@ -1,6 +1,5 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     CurrentUserView,
@@ -12,6 +11,7 @@ from .views import (
     PasswordChangeView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
+    SendStackTokenRefreshView,
 )
 from .signup_views import SignupView
 
@@ -23,7 +23,7 @@ urlpatterns = [
     # open, how long is the trial); POST creates the workspace.
     path("signup/", SignupView.as_view(), name="signup"),
     path("token/", LoginView.as_view(), name="token_obtain_pair"),
-    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh_v1"),
+    path("token/refresh/", SendStackTokenRefreshView.as_view(), name="token_refresh_v1"),
     # Blacklists the refresh token it is given, so signing out ends the
     # session on the server rather than only in this browser.
     path("logout/", LogoutView.as_view(), name="logout"),

@@ -22,9 +22,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from rest_framework_simplejwt.views import TokenRefreshView
-
-from apps.accounts.views import LoginView
+from apps.accounts.views import LoginView, SendStackTokenRefreshView
 from apps.leadgen.views import open_chat, widget_script
 from apps.tracking.views import redirect_link
 from apps.voice import webhooks as voice_webhooks
@@ -91,10 +89,13 @@ urlpatterns = [
 
     path(
         "api/auth/token/refresh/",
-        TokenRefreshView.as_view(),
+        SendStackTokenRefreshView.as_view(),
         name="token_refresh",
     ),
 
+    # Sign-in with WorkEasy360 Accounts (docs/workeasy360-sso.md): start,
+    # callback, sign-out, back-channel logout and the sign-in page's status.
+    path("api/v1/auth/workeasy360/", include("apps.workeasy360.urls")),
     path("api/v1/auth/", include("apps.accounts.urls")),
     path("api/v1/tenants/", include("apps.tenants.urls")),
     path("api/v1/billing/", include("apps.subscriptions.urls")),

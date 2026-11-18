@@ -1,0 +1,16 @@
+# The WorkEasy360 sign-in connector (docs/workeasy360-sso.md).
+#
+# PRIVATE repository WorkEasy360/workeasy360-sso, pinned to one commit
+# (v0.3.1, a98552f). Reading it needs access: a read-only deploy key (the
+# Dockerfile forwards it with BuildKit's --ssh), or your own GitHub access in
+# development. Nothing of the connector is vendored into this public
+# repository.
+#
+# Install it on its own, with --no-deps:
+#
+#     pip install --no-deps -r requirements/workeasy360.txt
+#
+# Its 0.3.1 metadata says Django<6.1, but its whole test suite passes on
+# Django 6.1 (and 6.1.3); its dependencies (PyJWT[crypto], httpx) are pinned
+# in base.txt instead. Drop --no-deps once a connector release declares 6.1.
+workeasy360-sso @ git+ssh://git@github.com/WorkEasy360/workeasy360-sso.git@a98552f8f37e1e4f1fab1de99cc5b915cb9ed5c1

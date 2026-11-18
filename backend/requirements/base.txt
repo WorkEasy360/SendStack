@@ -12,6 +12,13 @@ python-dotenv==1.2.3
 cryptography==50.0.0
 requests==2.34.2
 argon2-cffi==25.1.0
+
+# What the WorkEasy360 sign-in connector (requirements/workeasy360.txt) needs.
+# Listed here, pinned, because the connector itself is installed with
+# --no-deps -- see docs/workeasy360-sso.md, "Installing the connector".
+PyJWT[crypto]==2.15.1
+httpx==0.28.1
+
 # QR codes for click-to-chat posters. Pure Python, no dependencies of its own,
 # and no image library needed -- it renders SVG directly.
 segno==1.6.6

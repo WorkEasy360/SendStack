@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.audit.models import AuditEvent
@@ -24,6 +24,7 @@ from apps.credits.services import CreditError, reclaim_credits_on_delete
 from apps.subscriptions.entitlements import EntitlementError
 from apps.subscriptions.services import quota_guard
 from apps.tenants.models import Tenant
+from apps.workeasy360 import services as workeasy360
 from core import lockout
 from core.bulk import BulkActionError, BulkActionMixin
 
@@ -60,6 +61,19 @@ LOGIN_LOCKOUT_SCOPE = "login"
 PASSWORD_RESET_SCOPE = "password_reset"
 
 
+#: WORKEASY360_SSO_ONLY=true: the password endpoints answer this.
+PASSWORD_SIGN_IN_DISABLED = {
+    "detail": "Password sign-in is turned off here. Continue with WorkEasy360.",
+    "code": "password_sign_in_disabled",
+}
+
+#: An account that belongs to a WorkEasy360 person has no SendStack password.
+WORKEASY360_ACCOUNT = {
+    "detail": "This account signs in with WorkEasy360.",
+    "code": "workeasy360_account",
+}
+
+
 class LoginView(TokenObtainPairView):
     serializer_class = SendStackTokenSerializer
 
@@ -83,6 +97,9 @@ class LoginView(TokenObtainPairView):
         # attacker rotating addresses walks straight past. The lockout counts
         # attempts against the *account*, which they cannot.
         identifier = str(request.data.get("username") or "")
+
+        if workeasy360.sso_only():
+            return Response(PASSWORD_SIGN_IN_DISABLED, status=status.HTTP_403_FORBIDDEN)
 
         if lockout.is_locked(LOGIN_LOCKOUT_SCOPE, identifier):
             # 429 with no wait hint, and the same response whether or not this
@@ -134,6 +151,13 @@ class LoginView(TokenObtainPairView):
             )
 
         lockout.clear(LOGIN_LOCKOUT_SCOPE, identifier)
+
+        # Its password was retired when it was linked, so this only happens if
+        # somebody set one by hand. Still not a way around WorkEasy360: its
+        # sign-out, its entitlement and its back-channel logout must hold.
+        if workeasy360.has_workeasy360_identity(user):
+            return Response(WORKEASY360_ACCOUNT, status=status.HTTP_401_UNAUTHORIZED)
+
         if user.tenant_id:
             AuditEvent.objects.create(actor=user, tenant_id=user.tenant_id, action="auth.login")
 
@@ -177,11 +201,29 @@ class LogoutView(APIView):
         return Response({"detail": "Signed out."}, status=status.HTTP_200_OK)
 
 
+class SendStackTokenRefreshView(TokenRefreshView):
+    """The refresh endpoint, closed when WorkEasy360 is the only way in."""
+
+    def post(self, request, *args, **kwargs):
+        if workeasy360.sso_only():
+            return Response(PASSWORD_SIGN_IN_DISABLED, status=status.HTTP_401_UNAUTHORIZED)
+        return super().post(request, *args, **kwargs)
+
+
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response({"data": CurrentUserSerializer(request.user).data})
+        from apps.workeasy360.authentication import access_summary
+
+        data = dict(CurrentUserSerializer(request.user).data)
+        # Present only when WorkEasy360 has a say: a WorkEasy360 session, or a
+        # password session in a workspace linked to an organization. The app
+        # shows "your access has ended" from it.
+        summary = access_summary(request)
+        if summary is not None:
+            data["workeasy360"] = summary
+        return Response({"data": data})
 
 
 #: The one sentence this endpoint ever says. A constant because it must be
@@ -218,9 +260,14 @@ class PasswordResetRequestView(APIView):
         # is registered.
         over_limit = _password_reset_over_limit(email)
 
-        user = get_user_model().objects.filter(
-            email__iexact=email, is_active=True
-        ).select_related("tenant").first()
+        user = None
+        if not workeasy360.sso_only():
+            # A WorkEasy360 person's account has no SendStack password, and a
+            # reset must not give it one: that would be a way in that
+            # WorkEasy360's sign-out and entitlement could not reach.
+            user = get_user_model().objects.filter(
+                email__iexact=email, is_active=True, workeasy360_identities__isnull=True,
+            ).select_related("tenant").first()
 
         if user and not over_limit:
             uid = urlsafe_base64_encode(force_bytes(user.pk))
@@ -293,6 +340,10 @@ class PasswordResetConfirmView(APIView):
             user = get_user_model().objects.select_related("tenant").get(pk=user_id, is_active=True)
         except (TypeError, ValueError, OverflowError, get_user_model().DoesNotExist):
             user = None
+        if workeasy360.sso_only():
+            return Response(PASSWORD_SIGN_IN_DISABLED, status=status.HTTP_403_FORBIDDEN)
+        if user is not None and workeasy360.has_workeasy360_identity(user):
+            user = None
         if not user or not default_token_generator.check_token(user, serializer.validated_data["token"]):
             return Response({"detail": "This password-reset link is invalid or has expired."}, status=400)
 
@@ -347,6 +398,8 @@ class PasswordChangeView(APIView):
     throttle_scope = AUTH_THROTTLE_SCOPE
 
     def post(self, request):
+        if workeasy360.has_workeasy360_identity(request.user):
+            return Response(WORKEASY360_ACCOUNT, status=status.HTTP_403_FORBIDDEN)
         serializer = PasswordChangeSerializer(data=request.data, context={"user": request.user})
         serializer.is_valid(raise_exception=True)
 
@@ -392,7 +445,11 @@ class ManagedUserViewSet(BulkActionMixin, viewsets.ModelViewSet):
         if actor.role == actor.Role.SUPERADMIN:
             return queryset
         if actor.role == actor.Role.RESELLER and actor.tenant_id:
-            return queryset.filter(role=actor.Role.USER, tenant__parent_id=actor.tenant_id)
+            # A workspace linked to a WorkEasy360 organization is that
+            # organization's alone: no reseller administers its people.
+            return queryset.filter(
+                role=actor.Role.USER, tenant__parent_id=actor.tenant_id,
+            ).exclude(tenant__workeasy360_link__isnull=False)
         return queryset.filter(pk=actor.pk)
 
     def get_serializer_class(self):
@@ -543,13 +600,30 @@ class ImpersonationStartView(APIView):
 
     @transaction.atomic
     def post(self, request):
+        from apps.workeasy360.authentication import is_workeasy360_request
+
         serializer = ImpersonationStartSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if is_workeasy360_request(request):
+            # A WorkEasy360 session is one organization's; it acts as nobody else.
+            return Response({"detail": "You cannot impersonate this user."}, status=status.HTTP_403_FORBIDDEN)
         target = get_user_model().objects.select_related("tenant", "tenant__parent").filter(
             pk=serializer.validated_data["user_id"], is_active=True
         ).first()
         if not target or not request.user.can_manage(target):
             return Response({"detail": "You cannot impersonate this user."}, status=status.HTTP_403_FORBIDDEN)
+        if workeasy360.managed_by_workeasy360(target):
+            # Impersonation mints SendStack tokens. For a WorkEasy360 person, or
+            # anybody in a WorkEasy360 organization's workspace, that would be
+            # an identity WorkEasy360 never issued, outside its sign-out and its
+            # entitlement. Support for such a workspace goes through WorkEasy360.
+            return Response(
+                {
+                    "detail": "This account's organization signs in with WorkEasy360; it cannot be impersonated.",
+                    "code": "workeasy360_account",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         refresh = RefreshToken.for_user(target)
         expires_at = timezone.now() + timedelta(hours=1)
