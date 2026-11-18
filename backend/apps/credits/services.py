@@ -19,7 +19,11 @@ def visible_accounts(actor):
     if actor.role == actor.Role.SUPERADMIN:
         return User.objects.all()
     if actor.role == actor.Role.RESELLER and actor.tenant_id:
-        return User.objects.filter(models.Q(pk=actor.pk) | models.Q(role=actor.Role.USER, tenant__parent_id=actor.tenant_id))
+        # Never a workspace linked to a WorkEasy360 organization (docs/workeasy360-sso.md).
+        return User.objects.filter(
+            models.Q(pk=actor.pk)
+            | models.Q(role=actor.Role.USER, tenant__parent_id=actor.tenant_id, tenant__workeasy360_link__isnull=True)
+        )
     return User.objects.filter(pk=actor.pk)
 
 

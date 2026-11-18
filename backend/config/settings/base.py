@@ -53,10 +53,15 @@ INSTALLED_APPS = [
     "corsheaders",
     "django_filters",
     "drf_spectacular",
+    # Sign-in with WorkEasy360 Accounts: the OpenID Connect protocol, the
+    # (issuer, sub) identity links and back-channel logout. See
+    # docs/workeasy360-sso.md and the WORKEASY360_SSO block below.
+    "workeasy360_sso",
 
     # SendStack apps
     "apps.tenants",
     "apps.accounts",
+    "apps.workeasy360",
     "apps.whatsapp",
     "apps.contacts",
     "apps.templates_app",
@@ -104,6 +109,10 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # Keeps a WorkEasy360 sign-in's back-channel record pointed at its session
+    # if the key is ever rotated. Never redirects or refuses: the API decides
+    # (apps.workeasy360.authentication).
+    "workeasy360_sso.middleware.SessionTrackingMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "core.middleware.RequestIDMiddleware",
@@ -132,6 +141,17 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 AUTH_USER_MODEL = "accounts.User"
+
+# The connector's backend only *loads* people a WorkEasy360 sign-in signed in;
+# it authenticates nothing by itself.
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "workeasy360_sso.backends.WorkEasy360Backend",
+]
+
+# Server-side sessions, so a WorkEasy360 sign-out (back-channel logout) can end
+# one from the server, for every instance at once. Django's default, stated.
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
 
 
 # Database
@@ -1096,7 +1116,13 @@ REALTIME_FALLBACK_POLL_SECONDS = int(os.getenv("REALTIME_FALLBACK_POLL_SECONDS",
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        # First, so an unauthenticated request is answered 401 with its
+        # WWW-Authenticate header, as before.
         "apps.accounts.authentication.SendStackJWTAuthentication",
+        # A WorkEasy360 sign-in's server-side session (cookie, CSRF-checked),
+        # re-checked on every request. Other Django sessions -- the admin's --
+        # are not API credentials. See apps/workeasy360/authentication.py.
+        "apps.workeasy360.authentication.WorkEasy360SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -1170,6 +1196,35 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("JWT_REFRESH_TOKEN_DAYS", "7"))),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
+}
+
+# --- Sign-in with WorkEasy360 Accounts ------------------------------------
+#
+# Off until WORKEASY360_ISSUER, WORKEASY360_CLIENT_ID, WORKEASY360_REDIRECT_URI
+# and a credential (WORKEASY360_KEY_ID + WORKEASY360_PRIVATE_KEY_FILE) are set;
+# password sign-in keeps working unless WORKEASY360_SSO_ONLY=true. The
+# connector reads every other WORKEASY360_* variable from the environment
+# itself. Keys set here win over the environment, so only what SendStack fixes
+# is here. Full list: docs/workeasy360-sso.md.
+from apps.workeasy360.messages import ERROR_MESSAGES as _W360_ERROR_MESSAGES  # noqa: E402
+
+WORKEASY360_SSO = {
+    "PRODUCT_CODE": os.getenv("WORKEASY360_PRODUCT_CODE", "workeasy_sendstack"),
+    "USER_ADAPTER": "apps.workeasy360.adapters.SendStackUserAdapter",
+    "ORGANIZATION_ADAPTER": "apps.workeasy360.adapters.SendStackOrganizationAdapter",
+    # The single-page app's routes (nginx serves them on the same origin).
+    "LOGIN_URL": "/login",
+    "LOGIN_REDIRECT_URL": "/",
+    "LOGOUT_REDIRECT_URL": "/login",
+    "ERROR_REDIRECT_URL": os.getenv("WORKEASY360_ERROR_REDIRECT_URL", "/login"),
+    # Django serves no page a person navigates to (the SPA is nginx's), so
+    # nothing here may start a sign-in by itself.
+    "AUTO_START": False,
+    # Never link an existing account by its email address.
+    "LINK_BY_VERIFIED_EMAIL": False,
+    "ERROR_MESSAGES": _W360_ERROR_MESSAGES,
+    # A Celery time limit is not a WorkEasy360 outage.
+    "PROPAGATE_EXCEPTIONS": ["celery.exceptions.SoftTimeLimitExceeded"],
 }
 
 CORS_ALLOWED_ORIGINS = env_list(

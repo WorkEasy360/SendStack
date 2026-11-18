@@ -18,7 +18,51 @@ class SendStackJWTAuthentication(JWTAuthentication):
 
     Both are checked here rather than in each view, because a check a view has
     to remember is a check the next view forgets.
+
+    Since WorkEasy360 sign-in (docs/workeasy360-sso.md) three more, for the
+    same reason:
+
+    * ``WORKEASY360_SSO_ONLY=true`` refuses every password session at once,
+      however long its token still has to run;
+    * an account that belongs to a WorkEasy360 person is used through a
+      WorkEasy360 session only. A SimpleJWT token for it -- left over from
+      before it was linked, or minted by an impersonation -- is refused, so
+      nothing outside WorkEasy360 can act as that person or survive their
+      WorkEasy360 sign-out;
+    * a password session in a workspace linked to a WorkEasy360 organization
+      is subject to that organization's entitlement, on WorkEasy360's
+      schedule (apps.workeasy360.authentication.enforce_entitlement).
     """
+
+    def authenticate(self, request):
+        result = super().authenticate(request)
+        if result is None:
+            return None
+        user, token = result
+
+        from apps.workeasy360 import services as workeasy360
+        from apps.workeasy360.authentication import (
+            WorkEasy360AuthenticationFailed,
+            enforce_entitlement,
+            sign_in_required,
+        )
+
+        if workeasy360.sso_only():
+            raise sign_in_required()
+        if workeasy360.has_workeasy360_identity(user):
+            raise WorkEasy360AuthenticationFailed(
+                "This account signs in with WorkEasy360.", code="workeasy360_account",
+            )
+        organization_id = workeasy360.linked_organization_id(user.tenant_id)
+        if organization_id is not None:
+            if token.get("impersonation_session_id"):
+                # Started before the workspace was linked: it ends at the link,
+                # because nobody outside the organization acts as its people.
+                raise WorkEasy360AuthenticationFailed(
+                    "This account's organization signs in with WorkEasy360.", code="workeasy360_account",
+                )
+            enforce_entitlement(request, organization_id=organization_id, subject=None)
+        return user, token
 
     def get_user(self, validated_token):
         user = super().get_user(validated_token)

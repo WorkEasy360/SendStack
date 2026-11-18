@@ -1,4 +1,7 @@
 import axios from "axios";
+import { csrfToken, loadWorkeasy360Status } from "./workeasy360";
+
+const UNSAFE_METHODS = new Set(["post", "put", "patch", "delete"]);
 
 const api = axios.create({
     baseURL: import.meta.env.VITE_API_BASE_URL || "/api/v1",
@@ -11,6 +14,12 @@ api.interceptors.request.use((config) => {
     const token = localStorage.getItem("access_token");
     if (token) {
         config.headers.Authorization = `Bearer ${token}`;
+    } else if (UNSAFE_METHODS.has((config.method || "get").toLowerCase()) && csrfToken()) {
+        // A WorkEasy360 sign-in is a server-side session in an httpOnly
+        // cookie, which the browser sends by itself; a write must also prove
+        // it came from this app. The token is kept in memory only
+        // (services/workeasy360.js).
+        config.headers["X-CSRFToken"] = csrfToken();
     }
 
     // A file upload must not carry this instance's default JSON content type.
@@ -66,6 +75,15 @@ api.interceptors.response.use(
 
         if (!response) {
             return Promise.reject(error);
+        }
+
+        // A cookie session's CSRF token can be stale after a reload or a new
+        // sign-in: fetch a fresh one and try once more.
+        const detail = typeof response.data?.detail === "string" ? response.data.detail : "";
+        if (response.status === 403 && detail.startsWith("CSRF") && !config._csrfRetried) {
+            config._csrfRetried = true;
+            await loadWorkeasy360Status();
+            return api(config);
         }
 
         if (response.status === 401 && !config._retried && !config.url?.includes("/auth/token/")) {

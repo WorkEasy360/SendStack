@@ -1,7 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import axios from "axios";
 import api from "../services/api";
+import { hasSession } from "../services/workeasy360";
 import { applyBrandColor } from "../utils/brandColor";
+import { useAuth } from "./AuthContext";
 import { useDarkMode } from "../utils/theme";
 
 /**
@@ -27,6 +29,7 @@ const DEFAULTS = {
 const BrandingContext = createContext({ branding: DEFAULTS, reloadBranding: () => {} });
 
 export function BrandingProvider({ children }) {
+    const { user } = useAuth();
     const [branding, setBranding] = useState(DEFAULTS);
 
     const loadPublic = useCallback(async () => {
@@ -45,7 +48,7 @@ export function BrandingProvider({ children }) {
     }, []);
 
     const reloadBranding = useCallback(async () => {
-        if (!localStorage.getItem("access_token")) {
+        if (!hasSession()) {
             await loadPublic();
             return;
         }
@@ -57,9 +60,11 @@ export function BrandingProvider({ children }) {
         }
     }, [loadPublic]);
 
+    // Again once somebody is signed in: a WorkEasy360 sign-in arrives on a
+    // full page load, with no sign-in form to call this.
     useEffect(() => {
         reloadBranding();
-    }, [reloadBranding]);
+    }, [reloadBranding, user]);
 
     // Colour is a document-level concern (it drives every `brand-` utility),
     // and the name is what the browser tab says.

@@ -30,7 +30,12 @@ def customer_summaries(parent_tenant_id, *, include_all=False) -> list:
     from apps.subscriptions.models import Subscription
     from apps.whatsapp.models import WhatsAppAccount
 
-    tenants = Tenant.objects.all() if include_all else Tenant.objects.filter(parent_id=parent_tenant_id)
+    if include_all:
+        tenants = Tenant.objects.all()
+    else:
+        # A reseller's customers, minus any linked to a WorkEasy360
+        # organization: those belong to the organization, not to the reseller.
+        tenants = Tenant.objects.filter(parent_id=parent_tenant_id, workeasy360_link__isnull=True)
     tenants = list(tenants.order_by("name"))
     tenant_ids = [tenant.pk for tenant in tenants]
     if not tenant_ids:

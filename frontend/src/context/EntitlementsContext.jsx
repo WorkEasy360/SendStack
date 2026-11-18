@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import api from "../services/api";
+import { sessionKey } from "../services/workeasy360";
 import { useAuth } from "./AuthContext";
 
 /**
@@ -43,7 +44,7 @@ export function EntitlementsProvider({ children }) {
     const fetchedWithToken = useRef(null);
 
     const refresh = useCallback(async () => {
-        if (!localStorage.getItem("access_token")) {
+        if (!sessionKey()) {
             fetchedWithToken.current = null;
             setEntitlements(null);
             setLoading(false);
@@ -75,7 +76,8 @@ export function EntitlementsProvider({ children }) {
         // `user` is still in the dependency list as the signal to come back
         // and look. When it changes but the token has not, the fetch is
         // skipped, so the cold-load pass costs one request rather than two.
-        const token = localStorage.getItem("access_token");
+        // A WorkEasy360 session has no token in localStorage: its key stands in.
+        const token = sessionKey();
         if (!token) {
             fetchedWithToken.current = null;
             setEntitlements(null);

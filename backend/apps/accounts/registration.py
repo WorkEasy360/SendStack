@@ -67,6 +67,13 @@ class RegistrationRefused(Exception):
 
 
 def signup_enabled() -> bool:
+    # A deployment that signs people in only through WorkEasy360 has no
+    # password accounts to create: workspaces come from WorkEasy360
+    # organizations (docs/workeasy360-sso.md).
+    from apps.workeasy360.services import sso_only
+
+    if sso_only():
+        return False
     return bool(getattr(settings, "SELF_SERVICE_SIGNUP_ENABLED", False))
 
 

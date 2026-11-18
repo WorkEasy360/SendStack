@@ -105,12 +105,17 @@ class User(AbstractUser):
             return False
         if self.role == self.Role.SUPERADMIN:
             return True
-        return (
+        from apps.workeasy360.services import managed_by_workeasy360
+
+        return bool(
             self.role == self.Role.RESELLER
             and other_user.role == self.Role.USER
             and self.tenant_id
             and other_user.tenant_id
             and other_user.tenant.parent_id == self.tenant_id
+            # A WorkEasy360 organization's people are that organization's: a
+            # reseller never administers or impersonates them.
+            and not managed_by_workeasy360(other_user)
         )
 
 

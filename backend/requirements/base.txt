@@ -12,6 +12,13 @@ python-dotenv==1.2.3
 cryptography==50.0.0
 requests==2.34.2
 argon2-cffi==25.1.0
+
+# Imported directly by apps/workeasy360/fake_provider.py, the WorkEasy360
+# stand-in the sign-in tests run against (it signs ES256 tokens and verifies
+# client assertions). simplejwt and the connector (requirements/workeasy360.txt)
+# need it too, within their own ranges.
+PyJWT[crypto]==2.15.1
+
 # QR codes for click-to-chat posters. Pure Python, no dependencies of its own,
 # and no image library needed -- it renders SVG directly.
 segno==1.6.6

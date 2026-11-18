@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import api, { apiErrorMessage } from "../services/api";
+import { loadWorkeasy360Status, submitSignOut, workeasy360State } from "../services/workeasy360";
 
 const AuthContext = createContext(null);
 
@@ -21,9 +22,15 @@ export function AuthProvider({ children }) {
     const loadCurrentUser = useCallback(async () => {
         const token = localStorage.getItem("access_token");
         if (!token) {
-            setUser(null);
-            setLoading(false);
-            return;
+            // No password session: is there a WorkEasy360 one (an httpOnly
+            // cookie this code cannot see)? Asked of an endpoint that never
+            // answers 401, so a signed-out visitor is not bounced to /login.
+            const sso = await loadWorkeasy360Status();
+            if (!sso.signedIn) {
+                setUser(null);
+                setLoading(false);
+                return;
+            }
         }
         try {
             const response = await api.get("/auth/me/");
@@ -95,6 +102,13 @@ export function AuthProvider({ children }) {
     }, []);
 
     const logout = useCallback(async () => {
+        // A WorkEasy360 session ends on the server, which then sends the
+        // browser to the sign-in page. SendStack only: WorkEasy360 and the
+        // other products stay signed in.
+        if (user?.workeasy360?.session && workeasy360State().logoutUrl) {
+            submitSignOut(workeasy360State().logoutUrl);
+            return;
+        }
         // Tell the server first, then forget locally. Clearing localStorage on
         // its own left the refresh token valid for its full lifetime, so
         // signing out of a shared or lost machine protected nobody -- anyone
@@ -119,6 +133,12 @@ export function AuthProvider({ children }) {
         localStorage.removeItem("impersonation_meta");
         setImpersonation(null);
         setUser(null);
+    }, [user]);
+
+    /** "Sign out of WorkEasy360 too": SendStack's session first, then WorkEasy360's own sign-out. */
+    const logoutEverywhere = useCallback(() => {
+        const url = workeasy360State().logoutWorkeasy360Url;
+        if (url) submitSignOut(url);
     }, []);
 
     const loginAs = useCallback(async (targetUser, reason) => {
@@ -166,7 +186,7 @@ export function AuthProvider({ children }) {
     }, [loadCurrentUser, logout]);
 
     return (
-        <AuthContext.Provider value={{ user, loading, login, signup, logout, loginAs, impersonation, exitImpersonation, refresh: loadCurrentUser }}>
+        <AuthContext.Provider value={{ user, loading, login, signup, logout, logoutEverywhere, loginAs, impersonation, exitImpersonation, refresh: loadCurrentUser }}>
             {children}
         </AuthContext.Provider>
     );
