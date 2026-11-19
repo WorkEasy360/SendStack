@@ -16,7 +16,7 @@
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.19",
     "baileys_helper": "^1.0.6",
-    "express": "^4.21.2",
+    "express": "^4.22.3",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4"
   },
